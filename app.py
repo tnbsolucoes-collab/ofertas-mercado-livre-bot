@@ -18,6 +18,18 @@ ML_ACCESS_TOKEN = None
 OFERTAS = {}
 AGUARDANDO_LINK = {}
 
+# Termos usados para encontrar categorias diferentes.
+# Depois vamos ampliar e adicionar filtros de promocao.
+TERMOS_CATEGORIAS = [
+    "smartphone",
+    "fone bluetooth",
+    "smart tv",
+    "notebook",
+    "tenis",
+    "perfume",
+    "air fryer"
+]
+
 
 def telegram_api(metodo, payload):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/{metodo}"
@@ -61,7 +73,7 @@ def home():
 
     <p>
         <a href="/buscar-mais-vendidos">
-            2 - Buscar mais vendidos
+            2 - Buscar mais vendidos 🔥
         </a>
     </p>
 
@@ -165,6 +177,37 @@ def oauth_callback():
     """
 
 
+def descobrir_categoria(termo, headers):
+    try:
+        resposta = requests.get(
+            "https://api.mercadolibre.com/sites/MLB/domain_discovery/search",
+            headers=headers,
+            params={
+                "q": termo,
+                "limit": 1
+            },
+            timeout=20
+        )
+
+    except requests.RequestException:
+        return None
+
+    if resposta.status_code != 200:
+        return None
+
+    resultados = resposta.json()
+
+    if not resultados:
+        return None
+
+    category_id = resultados[0].get("category_id")
+
+    if not category_id:
+        return None
+
+    return category_id
+
+
 def pegar_item(item_id, headers):
     try:
         resposta = requests.get(
@@ -172,6 +215,7 @@ def pegar_item(item_id, headers):
             headers=headers,
             timeout=20
         )
+
     except requests.RequestException:
         return None
 
@@ -180,12 +224,12 @@ def pegar_item(item_id, headers):
 
     item = resposta.json()
 
+    if item.get("status") != "active":
+        return None
+
     permalink = item.get("permalink")
 
     if not permalink:
-        return None
-
-    if item.get("status") != "active":
         return None
 
     titulo = item.get("title") or "Produto"
@@ -216,26 +260,83 @@ def pegar_item(item_id, headers):
     }
 
 
-def procurar_item_nos_highlights(resultados, headers):
-    for resultado in resultados:
-        tipo = str(
-            resultado.get("type", "")
-        ).upper()
+def consultar_ranking_categoria(category_id, headers):
+    try:
+        resposta = requests.get(
+            (
+                "https://api.mercadolibre.com/"
+                f"highlights/MLB/category/{category_id}"
+            ),
+            headers=headers,
+            timeout=20
+        )
 
-        item_id = resultado.get("id")
+    except requests.RequestException:
+        return None
 
-        if tipo != "ITEM":
-            continue
+    if resposta.status_code != 200:
+        return None
 
-        if not item_id:
-            continue
+    dados = resposta.json()
 
-        oferta = pegar_item(
-            item_id,
+    return dados.get("content") or []
+
+
+def encontrar_item_mais_vendido(headers):
+    for termo in TERMOS_CATEGORIAS:
+
+        category_id = descobrir_categoria(
+            termo,
             headers
         )
 
-        if oferta:
+        if not category_id:
+            continue
+
+        ranking = consultar_ranking_categoria(
+            category_id,
+            headers
+        )
+
+        if not ranking:
+            continue
+
+        # Ranking ja vem com a posicao.
+        ranking = sorted(
+            ranking,
+            key=lambda x: x.get("position", 999)
+        )
+
+        for resultado in ranking:
+
+            tipo = str(
+                resultado.get("type", "")
+            ).upper()
+
+            item_id = resultado.get("id")
+            posicao = resultado.get("position")
+
+            # Primeiro teste:
+            # usamos apenas ITEM porque ele representa
+            # uma publicacao individual.
+            if tipo != "ITEM":
+                continue
+
+            if not item_id:
+                continue
+
+            oferta = pegar_item(
+                item_id,
+                headers
+            )
+
+            if not oferta:
+                continue
+
+            oferta["posicao"] = posicao
+            oferta["categoria_id"] = category_id
+            oferta["termo_categoria"] = termo
+
             return oferta
 
     return None
@@ -253,47 +354,22 @@ def buscar_mais_vendidos():
         "Authorization": f"Bearer {ML_ACCESS_TOKEN}"
     }
 
-    try:
-        resposta = requests.get(
-            "https://api.mercadolibre.com/highlights/MLB",
-            headers=headers,
-            timeout=20
-        )
-
-    except requests.RequestException:
-        return "Erro ao buscar os mais vendidos."
-
-    if resposta.status_code != 200:
-        return (
-            "Erro ao consultar mais vendidos. "
-            f"Codigo: {resposta.status_code}"
-        )
-
-    dados = resposta.json()
-
-    resultados = dados.get("content") or []
-
-    if not resultados:
-        return """
-        <h3>Nenhum resultado recebido.</h3>
-        <p>Tente novamente.</p>
-        """
-
-    oferta = procurar_item_nos_highlights(
-        resultados,
+    oferta = encontrar_item_mais_vendido(
         headers
     )
 
     if not oferta:
         return """
-        <h3>
-            Os mais vendidos retornados nao possuem
-            um ITEM direto disponivel.
-        </h3>
+        <h3>Nao encontrei um ITEM direto nos rankings testados.</h3>
 
         <p>
-            Precisamos tratar os resultados de catalogo
-            na proxima etapa.
+            O ranking respondeu, mas os resultados podem ser
+            PRODUCT ou USER_PRODUCT.
+        </p>
+
+        <p>
+            Nesse caso, a proxima etapa sera converter esses
+            tipos para uma oferta compravel.
         </p>
         """
 
@@ -305,15 +381,15 @@ def buscar_mais_vendidos():
     preco = oferta["preco"]
     imagem = oferta["imagem"]
     link_normal = oferta["link_normal"]
+    posicao = oferta.get("posicao", "?")
 
     legenda = (
         "🔥 MAIS VENDIDO ENCONTRADO!\n\n"
+        f"🏆 Posicao no ranking: #{posicao}\n\n"
         f"📦 {nome}\n\n"
         f"💰 {preco}\n\n"
         "🔗 LINK DO PRODUTO:\n"
         f"{link_normal}\n\n"
-        "⭐ Produto encontrado entre os "
-        "mais vendidos do Mercado Livre.\n\n"
         "👇 Deseja preparar essa oferta?"
     )
 
@@ -581,7 +657,6 @@ def telegram_webhook():
             return "OK", 200
 
         # Guarda exatamente o link enviado.
-        # Nao altera nem inventa parametros.
         oferta["link_afiliado"] = texto
 
         AGUARDANDO_LINK.pop(
@@ -597,10 +672,8 @@ def telegram_webhook():
                     "✅ LINK RECEBIDO!\n\n"
                     f"📦 {oferta['nome']}\n\n"
                     f"💰 {oferta['preco']}\n\n"
-                    "🔗 Link associado a essa oferta.\n\n"
-                    "🔒 Ainda NAO publiquei no canal.\n\n"
-                    "Depois vamos adicionar o botao "
-                    "final para publicar no canal."
+                    "🔗 Link associado a oferta.\n\n"
+                    "🔒 Ainda NAO publiquei no canal."
                 )
             }
         )
