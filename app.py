@@ -5,54 +5,32 @@ import io
 import json
 import uuid
 import requests
-
 from bs4 import BeautifulSoup
 from PIL import Image
 
-
 app = Flask(__name__)
-
 
 # =========================================================
 # CONFIGURAÇÕES
 # =========================================================
 
-BOT_TOKEN = os.environ.get(
-    "TELEGRAM_BOT_TOKEN",
-    ""
-).strip()
+BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+ADMIN_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+CHANNEL_ID = os.environ.get("TELEGRAM_CHANNEL_ID", "").strip()
 
-ADMIN_CHAT_ID = os.environ.get(
-    "TELEGRAM_CHAT_ID",
-    ""
-).strip()
+BASE_URL = "https://ofertas-mercado-livre-bot.onrender.com"
 
-CHANNEL_ID = os.environ.get(
-    "TELEGRAM_CHANNEL_ID",
-    ""
-).strip()
+WEBHOOK_URL = f"{BASE_URL}/telegram/webhook"
 
-BASE_URL = (
-    "https://ofertas-mercado-livre-bot.onrender.com"
-)
-
-WEBHOOK_URL = (
-    f"{BASE_URL}/telegram/webhook"
-)
-
-OFERTAS_URL = (
-    "https://www.mercadolivre.com.br/ofertas"
-)
+OFERTAS_URL = "https://www.mercadolivre.com.br/ofertas"
 
 TIMEOUT = 25
-
 
 # =========================================================
 # MEMÓRIA
 # =========================================================
 
 ofertas_pendentes = {}
-
 aguardando_link = {}
 
 
@@ -70,9 +48,7 @@ def headers():
             "(KHTML, like Gecko) "
             "Chrome/140.0 Safari/537.36"
         ),
-        "Accept-Language": (
-            "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7"
-        ),
+        "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
         "Accept": (
             "text/html,application/xhtml+xml,"
             "application/xml;q=0.9,image/webp,*/*;q=0.8"
@@ -84,10 +60,12 @@ def headers():
 # TELEGRAM
 # =========================================================
 
-def telegram(
-    metodo,
-    dados
-):
+def telegram(metodo, dados):
+
+    if not BOT_TOKEN:
+        raise RuntimeError(
+            "TELEGRAM_BOT_TOKEN não configurado."
+        )
 
     url = (
         "https://api.telegram.org/"
@@ -107,6 +85,11 @@ def telegram_foto(
     legenda,
     teclado=None
 ):
+
+    if not BOT_TOKEN:
+        raise RuntimeError(
+            "TELEGRAM_BOT_TOKEN não configurado."
+        )
 
     url = (
         "https://api.telegram.org/"
@@ -139,6 +122,42 @@ def telegram_foto(
         files=files,
         timeout=TIMEOUT
     )
+
+
+# =========================================================
+# WEBHOOK
+# =========================================================
+
+def configurar_webhook():
+
+    if not BOT_TOKEN:
+        print("BOT_TOKEN não configurado.")
+        return False
+
+    try:
+
+        resposta = telegram(
+            "setWebhook",
+            {
+                "url": WEBHOOK_URL
+            }
+        )
+
+        print(
+            "WEBHOOK:",
+            resposta.text
+        )
+
+        return resposta.status_code == 200
+
+    except Exception as erro:
+
+        print(
+            "ERRO WEBHOOK:",
+            erro
+        )
+
+        return False
 
 
 # =========================================================
@@ -213,7 +232,7 @@ def calcular_desconto(
 
 
 # =========================================================
-# ENCONTRAR ID DO MERCADO LIVRE
+# ID DO PRODUTO
 # =========================================================
 
 def encontrar_id_produto(url):
@@ -221,25 +240,22 @@ def encontrar_id_produto(url):
     if not url:
         return ""
 
-    encontrado = re.search(
+    resultado = re.search(
         r"(MLB\d+)",
         url.upper()
     )
 
-    if encontrado:
-
-        return encontrado.group(1)
+    if resultado:
+        return resultado.group(1)
 
     return ""
 
 
 # =========================================================
-# DADOS DO ITEM DO MERCADO LIVRE
+# DADOS DO PRODUTO
 # =========================================================
 
-def dados_item_mercado_livre(
-    item_id
-):
+def dados_item_mercado_livre(item_id):
 
     if not item_id:
         return None
@@ -266,20 +282,18 @@ def dados_item_mercado_livre(
         if resposta.status_code != 200:
 
             print(
-                "Resposta API:",
+                "API ERRO:",
                 resposta.text[:500]
             )
 
             return None
 
-        dados = resposta.json()
-
-        return dados
+        return resposta.json()
 
     except Exception as erro:
 
         print(
-            "Erro API item:",
+            "ERRO API ITEM:",
             erro
         )
 
@@ -287,12 +301,10 @@ def dados_item_mercado_livre(
 
 
 # =========================================================
-# BAIXAR IMAGEM
+# IMAGEM
 # =========================================================
 
-def baixar_imagem(
-    url
-):
+def baixar_imagem(url):
 
     if not url:
         return None
@@ -306,15 +318,11 @@ def baixar_imagem(
         )
 
         print(
-            "IMAGEM:",
-            resposta.status_code,
-            url[:200]
+            "IMAGEM HTTP:",
+            resposta.status_code
         )
 
         if resposta.status_code != 200:
-            return None
-
-        if not resposta.content:
             return None
 
         imagem = Image.open(
@@ -325,11 +333,8 @@ def baixar_imagem(
 
         if imagem.mode != "RGB":
 
-            imagem = imagem.convert(
-                "RGB"
-            )
+            imagem = imagem.convert("RGB")
 
-        # Reduz imagens enormes
         largura, altura = imagem.size
 
         limite = 1600
@@ -340,10 +345,7 @@ def baixar_imagem(
         ):
 
             imagem.thumbnail(
-                (
-                    limite,
-                    limite
-                )
+                (limite, limite)
             )
 
         memoria = io.BytesIO()
@@ -351,7 +353,8 @@ def baixar_imagem(
         imagem.save(
             memoria,
             format="JPEG",
-            quality=90
+            quality=90,
+            optimize=True
         )
 
         memoria.seek(0)
@@ -361,7 +364,7 @@ def baixar_imagem(
     except Exception as erro:
 
         print(
-            "ERRO IMAGEM:",
+            "ERRO BAIXANDO IMAGEM:",
             erro
         )
 
@@ -369,7 +372,7 @@ def baixar_imagem(
 
 
 # =========================================================
-# BUSCAR LINKS DE PRODUTOS
+# BUSCAR LINKS DE OFERTAS
 # =========================================================
 
 def buscar_links_ofertas():
@@ -385,7 +388,7 @@ def buscar_links_ofertas():
     except Exception as erro:
 
         print(
-            "Erro ofertas:",
+            "ERRO OFERTAS:",
             erro
         )
 
@@ -397,7 +400,6 @@ def buscar_links_ofertas():
     )
 
     if resposta.status_code != 200:
-
         return []
 
     soup = BeautifulSoup(
@@ -427,16 +429,14 @@ def buscar_links_ofertas():
         if not item_id:
             continue
 
-        url = href
+        if href.startswith("/"):
 
-        if url.startswith("/"):
-
-            url = (
+            href = (
                 "https://www.mercadolivre.com.br"
-                + url
+                + href
             )
 
-        encontrados[item_id] = url
+        encontrados[item_id] = href
 
     print(
         "PRODUTOS ENCONTRADOS:",
@@ -462,14 +462,13 @@ def montar_produto(
     )
 
     if not dados:
-
         return None
 
     # -----------------------------------------------------
     # NOME
     # -----------------------------------------------------
 
-    nome = (
+    titulo = (
         dados.get("title")
         or
         dados.get("family_name")
@@ -502,8 +501,6 @@ def montar_produto(
         or ""
     )
 
-    # Algumas respostas podem trazer
-    # pictures em vez de thumbnail
     if not imagem:
 
         pictures = (
@@ -546,75 +543,40 @@ def montar_produto(
         original
     )
 
-    # -----------------------------------------------------
-    # Se original não veio da API,
-    # NÃO mostramos R$ 0,00.
-    # -----------------------------------------------------
-
+    # Não mostrar R$ 0,00
     if original <= preco:
-
         original = 0
+        desconto = 0
 
     produto = {
 
-        "id":
-            item_id,
+        "id": item_id,
 
-        "titulo":
-            str(nome).strip(),
+        "titulo": str(
+            titulo
+        ).strip(),
 
-        "preco":
-            preco,
+        "preco": preco,
 
-        "original":
-            original,
+        "original": original,
 
-        "desconto":
-            desconto,
+        "desconto": desconto,
 
-        "imagem":
-            imagem,
+        "imagem": imagem,
 
-        "link":
-            permalink
+        "link": permalink
     }
 
     print("")
-    print(
-        "======================================"
-    )
-    print(
-        "PRODUTO:",
-        produto["titulo"]
-    )
-    print(
-        "ID:",
-        produto["id"]
-    )
-    print(
-        "PREÇO:",
-        produto["preco"]
-    )
-    print(
-        "ORIGINAL:",
-        produto["original"]
-    )
-    print(
-        "DESCONTO:",
-        produto["desconto"],
-        "%"
-    )
-    print(
-        "IMAGEM:",
-        produto["imagem"]
-    )
-    print(
-        "LINK:",
-        produto["link"]
-    )
-    print(
-        "======================================"
-    )
+    print("======================================")
+    print("PRODUTO:", produto["titulo"])
+    print("ID:", produto["id"])
+    print("PREÇO:", produto["preco"])
+    print("ORIGINAL:", produto["original"])
+    print("DESCONTO:", produto["desconto"])
+    print("IMAGEM:", produto["imagem"])
+    print("LINK:", produto["link"])
+    print("======================================")
     print("")
 
     return produto
@@ -624,9 +586,7 @@ def montar_produto(
 # TEXTO DE APROVAÇÃO
 # =========================================================
 
-def texto_aprovacao(
-    produto
-):
+def texto_aprovacao(produto):
 
     texto = (
         "🔥 OFERTA ENCONTRADA!\n\n"
@@ -664,12 +624,10 @@ def texto_aprovacao(
 
 
 # =========================================================
-# ENVIAR PARA APROVAÇÃO
+# ENVIAR APROVAÇÃO
 # =========================================================
 
-def enviar_aprovacao(
-    produto
-):
+def enviar_aprovacao(produto):
 
     token = uuid.uuid4().hex[:12]
 
@@ -702,51 +660,51 @@ def enviar_aprovacao(
 
     if imagem:
 
-        resposta = telegram_foto(
-            ADMIN_CHAT_ID,
-            imagem,
-            texto,
-            teclado
-        )
+        try:
 
-        if resposta.status_code == 200:
-
-            print(
-                "✅ Oferta enviada COM FOTO"
+            resposta = telegram_foto(
+                ADMIN_CHAT_ID,
+                imagem,
+                texto,
+                teclado
             )
 
-            return resposta
+            if resposta.status_code == 200:
 
-        print(
-            "Erro Telegram foto:",
-            resposta.text
-        )
+                print(
+                    "✅ ENVIADA COM FOTO"
+                )
 
-    # -----------------------------------------------------
-    # FALLBACK
-    # -----------------------------------------------------
+                return resposta
+
+            print(
+                "ERRO TELEGRAM FOTO:",
+                resposta.text
+            )
+
+        except Exception as erro:
+
+            print(
+                "ERRO FOTO:",
+                erro
+            )
 
     print(
-        "⚠️ Sem imagem. Enviando texto."
+        "⚠️ Enviando somente texto."
     )
 
     return telegram(
         "sendMessage",
         {
-            "chat_id":
-                ADMIN_CHAT_ID,
-
-            "text":
-                texto,
-
-            "reply_markup":
-                teclado
+            "chat_id": ADMIN_CHAT_ID,
+            "text": texto,
+            "reply_markup": teclado
         }
     )
 
 
 # =========================================================
-# BUSCAR OFERTAS
+# EXECUTAR BUSCA
 # =========================================================
 
 def executar_busca():
@@ -754,19 +712,11 @@ def executar_busca():
     links = buscar_links_ofertas()
 
     if not links:
-
         return 0
 
     enviadas = 0
 
-    vistos = set()
-
     for item_id, url in links:
-
-        if item_id in vistos:
-            continue
-
-        vistos.add(item_id)
 
         produto = montar_produto(
             item_id,
@@ -776,14 +726,15 @@ def executar_busca():
         if not produto:
             continue
 
-        # Precisa ter preço real
+        # Sem preço, ignora
         if produto["preco"] <= 0:
             continue
 
-        # Precisa ter desconto real
+        # Sem preço original, ignora
         if produto["original"] <= produto["preco"]:
             continue
 
+        # Sem desconto, ignora
         if produto["desconto"] <= 0:
             continue
 
@@ -794,17 +745,16 @@ def executar_busca():
             )
 
             if resposta.status_code == 200:
-
                 enviadas += 1
 
         except Exception as erro:
 
             print(
-                "Erro enviando oferta:",
+                "ERRO ENVIANDO OFERTA:",
                 erro
             )
 
-        # Não manda 20 ofertas de uma vez
+        # Máximo 3 por busca
         if enviadas >= 3:
             break
 
@@ -839,40 +789,44 @@ def publicar_canal(
 
     if imagem:
 
-        resposta = telegram_foto(
-            CHANNEL_ID,
-            imagem,
-            texto
-        )
+        try:
 
-        if resposta.status_code == 200:
+            resposta = telegram_foto(
+                CHANNEL_ID,
+                imagem,
+                texto
+            )
 
-            return resposta
+            if resposta.status_code == 200:
 
-        print(
-            "Erro foto canal:",
-            resposta.text
-        )
+                return resposta
+
+            print(
+                "ERRO FOTO CANAL:",
+                resposta.text
+            )
+
+        except Exception as erro:
+
+            print(
+                "ERRO CANAL FOTO:",
+                erro
+            )
 
     return telegram(
         "sendMessage",
         {
-            "chat_id":
-                CHANNEL_ID,
-
-            "text":
-                texto
+            "chat_id": CHANNEL_ID,
+            "text": texto
         }
     )
 
 
 # =========================================================
-# CALLBACK DO BOT
+# CALLBACK
 # =========================================================
 
-def callback_telegram(
-    callback
-):
+def callback_telegram(callback):
 
     callback_id = callback.get(
         "id"
@@ -931,12 +885,11 @@ def callback_telegram(
     if chat_id != str(
         ADMIN_CHAT_ID
     ):
-
         return
 
-    # =====================================================
+    # -----------------------------------------------------
     # DESCARTAR
-    # =====================================================
+    # -----------------------------------------------------
 
     if acao == "descartar":
 
@@ -948,9 +901,7 @@ def callback_telegram(
         telegram(
             "sendMessage",
             {
-                "chat_id":
-                    chat_id,
-
+                "chat_id": chat_id,
                 "text":
                     "❌ Oferta descartada."
             }
@@ -958,9 +909,9 @@ def callback_telegram(
 
         return
 
-    # =====================================================
+    # -----------------------------------------------------
     # APROVAR
-    # =====================================================
+    # -----------------------------------------------------
 
     if acao == "aprovar":
 
@@ -976,27 +927,21 @@ def callback_telegram(
         telegram(
             "sendMessage",
             {
-                "chat_id":
-                    chat_id,
-
-                "text":
-                    (
-                        "✅ OFERTA APROVADA!\n\n"
-                        "Agora me mande seu "
-                        "LINK DE AFILIADO do "
-                        "Mercado Livre."
-                    )
+                "chat_id": chat_id,
+                "text": (
+                    "✅ OFERTA APROVADA!\n\n"
+                    "Agora me mande seu "
+                    "LINK DE AFILIADO."
+                )
             }
         )
 
 
 # =========================================================
-# MENSAGEM RECEBIDA
+# RECEBER LINK DE AFILIADO
 # =========================================================
 
-def mensagem_telegram(
-    message
-):
+def mensagem_telegram(message):
 
     chat = message.get(
         "chat"
@@ -1012,13 +957,10 @@ def mensagem_telegram(
     if chat_id != str(
         ADMIN_CHAT_ID
     ):
-
         return
 
     texto = (
-        message.get(
-            "text"
-        )
+        message.get("text")
         or ""
     ).strip()
 
@@ -1041,12 +983,10 @@ def mensagem_telegram(
         telegram(
             "sendMessage",
             {
-                "chat_id":
-                    chat_id,
-
+                "chat_id": chat_id,
                 "text":
                     (
-                        "⚠️ Mande um link válido "
+                        "⚠️ Envie um link válido "
                         "começando com https://"
                     )
             }
@@ -1059,13 +999,11 @@ def mensagem_telegram(
         telegram(
             "sendMessage",
             {
-                "chat_id":
-                    chat_id,
-
+                "chat_id": chat_id,
                 "text":
                     (
                         "❌ TELEGRAM_CHANNEL_ID "
-                        "não configurado no Render."
+                        "não está configurado."
                     )
             }
         )
@@ -1082,20 +1020,18 @@ def mensagem_telegram(
     except Exception as erro:
 
         print(
-            "Erro publicando:",
+            "ERRO PUBLICAÇÃO:",
             erro
         )
 
         telegram(
             "sendMessage",
             {
-                "chat_id":
-                    chat_id,
-
+                "chat_id": chat_id,
                 "text":
                     (
                         "❌ Erro ao publicar. "
-                        "Veja os Logs do Render."
+                        "Veja os Logs."
                     )
             }
         )
@@ -1112,9 +1048,7 @@ def mensagem_telegram(
         telegram(
             "sendMessage",
             {
-                "chat_id":
-                    chat_id,
-
+                "chat_id": chat_id,
                 "text":
                     "🚀 Publicado no canal!"
             }
@@ -1123,16 +1057,14 @@ def mensagem_telegram(
     else:
 
         print(
-            "Erro Telegram:",
+            "ERRO TELEGRAM:",
             resposta.text
         )
 
         telegram(
             "sendMessage",
             {
-                "chat_id":
-                    chat_id,
-
+                "chat_id": chat_id,
                 "text":
                     (
                         "❌ Telegram recusou "
@@ -1169,7 +1101,7 @@ def home():
 
 
 # =========================================================
-# BUSCAR
+# BUSCAR OFERTAS
 # =========================================================
 
 @app.route(
@@ -1177,7 +1109,8 @@ def home():
 )
 def buscar():
 
-    configurar_webhook()
+    # NÃO chama configurar_webhook aqui.
+    # O webhook é configurado separadamente.
 
     quantidade = executar_busca()
 
@@ -1248,47 +1181,29 @@ def webhook():
 @app.route(
     "/configurar-webhook"
 )
-def configurar():
+def rota_configurar_webhook():
 
-    if not BOT_TOKEN:
+    sucesso = configurar_webhook()
 
-        return (
-            "❌ TELEGRAM_BOT_TOKEN "
-            "não configurado."
-        )
+    if sucesso:
 
-    try:
+        return """
+        <h1>✅ Webhook configurado!</h1>
 
-        resposta = telegram(
-            "setWebhook",
-            {
-                "url":
-                    WEBHOOK_URL
-            }
-        )
+        <p>
+            O bot está pronto para receber
+            os botões de aprovação.
+        </p>
+        """
 
-        print(
-            "WEBHOOK:",
-            resposta.text
-        )
+    return """
+    <h1>❌ Erro no webhook</h1>
 
-        if resposta.status_code == 200:
-
-            return """
-            <h1>✅ Webhook configurado!</h1>
-            """
-
-        return (
-            "<h1>❌ Erro webhook</h1>"
-            f"<pre>{resposta.text}</pre>"
-        )
-
-    except Exception as erro:
-
-        return (
-            "<h1>❌ Erro</h1>"
-            f"<pre>{erro}</pre>"
-        )
+    <p>
+        Confira o TELEGRAM_BOT_TOKEN
+        nas variáveis do Render.
+    </p>
+    """
 
 
 # =========================================================
