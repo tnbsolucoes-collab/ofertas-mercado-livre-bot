@@ -298,11 +298,11 @@ def consultar_item(item_id, headers):
 
 
 def converter_product(product_id, headers, profundidade=0):
-    """Converte PRODUCT em ITEM compravel pelo buy_box_winner.
+    """Converte PRODUCT em oferta.
 
-    Se o ranking apontar para um produto pai, testa poucos filhos terminais.
-    A documentacao do Mercado Livre informa que produtos pai podem nao ser
-    compraveis e que o buy_box_winner de um produto terminal traz o item_id.
+    Se houver ITEM vencedor, usa o anúncio real.
+    Se a API não expuser o buy_box_winner, não descarta o PRODUCT:
+    usa a página individual do produto do catálogo como fallback.
     """
     try:
         resposta = requests.get(
@@ -321,12 +321,13 @@ def converter_product(product_id, headers, profundidade=0):
     except ValueError:
         return None
 
-    if produto.get("status") != "active":
+    if produto.get("status") not in (None, "active"):
         return None
 
     vencedor = produto.get("buy_box_winner") or {}
     item_id = vencedor.get("item_id")
 
+    # Melhor caso: existe anúncio vencedor real.
     if item_id:
         oferta = consultar_item(item_id, headers)
         if oferta:
@@ -342,15 +343,50 @@ def converter_product(product_id, headers, profundidade=0):
             oferta["product_id"] = str(product_id)
             return oferta
 
-    # Produto pai: filhos mais especificos podem ter buy box compravel.
+    # Produto pai: tenta alguns filhos antes do fallback.
     if profundidade == 0:
         filhos = produto.get("children_ids") or []
-        for filho in filhos[:6]:
+        for filho in filhos[:5]:
             oferta = converter_product(filho, headers, profundidade=1)
-            if oferta:
+            if oferta and oferta.get("item_real"):
                 return oferta
 
-    return None
+    # FALLBACK IMPORTANTE:
+    # PRODUCT é um produto específico do catálogo e pode ser aberto pela
+    # página /p/{PRODUCT_ID}. Assim não dependemos do USER_PRODUCT de terceiro,
+    # que no token atual retorna 403.
+    nome = (
+        produto.get("name")
+        or produto.get("title")
+        or produto.get("short_description", {}).get("content")
+        or "Produto Mercado Livre"
+    )
+
+    imagem = None
+    pictures = produto.get("pictures") or []
+    if pictures:
+        primeira = pictures[0]
+        if isinstance(primeira, dict):
+            imagem = primeira.get("secure_url") or primeira.get("url")
+
+    if not imagem:
+        imagem = produto.get("thumbnail")
+
+    preco = vencedor.get("price")
+    original_price = vencedor.get("original_price")
+
+    return {
+        # Mantemos uma chave única para os botões e memória da oferta.
+        "item_id": str(product_id),
+        "product_id": str(product_id),
+        "item_real": False,
+        "nome": nome,
+        "preco_numero": preco,
+        "preco": formatar_preco(preco),
+        "preco_original": original_price,
+        "imagem": imagem,
+        "link_normal": f"https://www.mercadolivre.com.br/p/{product_id}",
+    }
 
 def calcular_desconto(preco, original_price):
     try:
@@ -725,9 +761,14 @@ def buscar_mais_vendidos():
         )
 
     else:
-        legenda += (
-            f"💰 Preco: {preco}\n\n"
-        )
+        if oferta.get("preco_numero") is None:
+            legenda += (
+                "💰 Confira o preco atual no link do produto.\n\n"
+            )
+        else:
+            legenda += (
+                f"💰 Preco: {preco}\n\n"
+            )
 
     legenda += (
         "🔗 LINK DO PRODUTO:\n"
