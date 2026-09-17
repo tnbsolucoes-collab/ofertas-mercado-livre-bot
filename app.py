@@ -428,7 +428,12 @@ def consultar_item_publico(item_id):
 
 
 def converter_user_product(user_product_id, headers):
-    """Converte um USER_PRODUCT do ranking em um item compravel."""
+    """Converte um USER_PRODUCT do ranking em uma publicacao compravel.
+
+    Primeiro consulta o UP. Depois tenta a busca privada do vendedor.
+    Se a API negar por o token nao pertencer ao vendedor, usa a busca
+    publica de listagens do seller e confere o user_product_id dos itens.
+    """
     try:
         resposta = requests.get(
             f"https://api.mercadolibre.com/user-products/{user_product_id}",
@@ -449,38 +454,125 @@ def converter_user_product(user_product_id, headers):
         return None
 
     seller_id = up.get("user_id") or up.get("seller_id")
+    category_id = up.get("category_id")
+    catalog_product_id = up.get("catalog_product_id")
+
     if not seller_id:
         print(f"USER_PRODUCT {user_product_id} sem user_id")
         return None
 
+    # 1) Tenta o recurso do vendedor. Em vendedores terceiros ele pode
+    # responder 401/403, porque o token nao pertence a esse seller.
     try:
         busca = requests.get(
             f"https://api.mercadolibre.com/users/{seller_id}/items/search",
             headers=headers,
-            params={"user_product_id": user_product_id, "limit": 50},
+            params={"user_product_id": user_product_id, "limit": 20},
+            timeout=4,
+        )
+        print(f"ITENS PRIVADOS USER_PRODUCT {user_product_id}: {busca.status_code}")
+
+        if busca.status_code == 200:
+            try:
+                item_ids = busca.json().get("results") or []
+            except ValueError:
+                item_ids = []
+
+            for item_id in item_ids[:5]:
+                oferta = consultar_item(item_id, headers)
+                if oferta:
+                    oferta["user_product_id"] = str(user_product_id)
+                    return oferta
+    except requests.RequestException as erro:
+        print(f"ERRO busca privada USER_PRODUCT {user_product_id}: {erro}")
+
+    # 2) Fallback para as listagens publicas do vendedor. Este recurso e
+    # documentado para listar anuncios ativos por seller_id.
+    params = {
+        "seller_id": seller_id,
+        "limit": 20,
+    }
+    if category_id:
+        params["category"] = category_id
+
+    try:
+        publica = requests.get(
+            "https://api.mercadolibre.com/sites/MLB/search",
+            headers=headers,
+            params=params,
             timeout=4,
         )
     except requests.RequestException as erro:
-        print(f"ERRO itens do USER_PRODUCT {user_product_id}: {erro}")
+        print(f"ERRO busca publica seller {seller_id}: {erro}")
         return None
 
-    print(f"ITENS USER_PRODUCT {user_product_id}: {busca.status_code}")
-    if busca.status_code != 200:
+    print(
+        f"LISTAGENS PUBLICAS seller={seller_id} "
+        f"UP={user_product_id}: {publica.status_code}"
+    )
+    if publica.status_code != 200:
         return None
 
     try:
-        item_ids = busca.json().get("results") or []
+        resultados = publica.json().get("results") or []
     except ValueError:
         return None
 
-    for item_id in item_ids:
+    # Alguns resultados ja trazem user_product_id/catalog_product_id.
+    # Se nao trouxerem, consulta apenas poucos itens para manter a rota rapida.
+    candidatos = []
+    for resultado in resultados[:20]:
+        rid = resultado.get("id")
+        if not rid:
+            continue
+
+        rup = str(resultado.get("user_product_id") or "")
+        rcp = str(resultado.get("catalog_product_id") or "")
+
+        if rup == str(user_product_id):
+            candidatos.insert(0, rid)
+        elif catalog_product_id and rcp == str(catalog_product_id):
+            candidatos.append(rid)
+
+    # Se a busca nao expuser os identificadores no resultado resumido,
+    # testa no maximo os 5 primeiros anuncios do seller/categoria.
+    if not candidatos:
+        candidatos = [r.get("id") for r in resultados[:5] if r.get("id")]
+
+    for item_id in candidatos[:5]:
+        try:
+            detalhe = requests.get(
+                f"https://api.mercadolibre.com/items/{item_id}",
+                headers=headers,
+                timeout=3,
+            )
+        except requests.RequestException:
+            continue
+
+        if detalhe.status_code != 200:
+            continue
+
+        try:
+            item = detalhe.json()
+        except ValueError:
+            continue
+
+        item_up = str(item.get("user_product_id") or "")
+        item_cp = str(item.get("catalog_product_id") or "")
+
+        corresponde = item_up == str(user_product_id)
+        if not corresponde and catalog_product_id:
+            corresponde = item_cp == str(catalog_product_id)
+
+        if not corresponde:
+            continue
+
         oferta = consultar_item(item_id, headers)
         if oferta:
             oferta["user_product_id"] = str(user_product_id)
             return oferta
 
     return None
-
 
 def encontrar_mais_vendido(headers):
     """Busca rapida para nao estourar o timeout do Gunicorn/Render."""
