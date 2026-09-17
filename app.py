@@ -6,6 +6,11 @@ app = Flask(__name__)
 
 CLIENT_ID = os.environ.get("ML_CLIENT_ID")
 CLIENT_SECRET = os.environ.get("ML_CLIENT_SECRET")
+
+print("ML_CLIENT_ID carregado:", bool(CLIENT_ID))
+print("ML_CLIENT_SECRET carregado:", bool(CLIENT_SECRET))
+print("Tamanho do CLIENT_ID:", len(CLIENT_ID or ""))
+print("Tamanho do CLIENT_SECRET:", len(CLIENT_SECRET or ""))
 REDIRECT_URI = "https://ofertas-mercado-livre-bot.onrender.com/oauth/callback"
 
 
