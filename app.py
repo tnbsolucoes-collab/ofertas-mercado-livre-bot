@@ -18,8 +18,6 @@ ML_ACCESS_TOKEN = None
 OFERTAS = {}
 AGUARDANDO_LINK = {}
 
-# Termos usados para encontrar categorias diferentes.
-# Depois vamos ampliar e adicionar filtros de promocao.
 TERMOS_CATEGORIAS = [
     "smartphone",
     "fone bluetooth",
@@ -27,12 +25,18 @@ TERMOS_CATEGORIAS = [
     "notebook",
     "tenis",
     "perfume",
-    "air fryer"
+    "air fryer",
+    "relogio",
+    "caixa de som",
+    "aspirador"
 ]
 
 
 def telegram_api(metodo, payload):
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/{metodo}"
+    url = (
+        f"https://api.telegram.org/"
+        f"bot{TELEGRAM_BOT_TOKEN}/{metodo}"
+    )
 
     return requests.post(
         url,
@@ -180,7 +184,10 @@ def oauth_callback():
 def descobrir_categoria(termo, headers):
     try:
         resposta = requests.get(
-            "https://api.mercadolibre.com/sites/MLB/domain_discovery/search",
+            (
+                "https://api.mercadolibre.com/"
+                "sites/MLB/domain_discovery/search"
+            ),
             headers=headers,
             params={
                 "q": termo,
@@ -200,15 +207,32 @@ def descobrir_categoria(termo, headers):
     if not resultados:
         return None
 
-    category_id = resultados[0].get("category_id")
-
-    if not category_id:
-        return None
-
-    return category_id
+    return resultados[0].get("category_id")
 
 
-def pegar_item(item_id, headers):
+def consultar_ranking(category_id, headers):
+    try:
+        resposta = requests.get(
+            (
+                "https://api.mercadolibre.com/"
+                f"highlights/MLB/category/{category_id}"
+            ),
+            headers=headers,
+            timeout=20
+        )
+
+    except requests.RequestException:
+        return []
+
+    if resposta.status_code != 200:
+        return []
+
+    dados = resposta.json()
+
+    return dados.get("content") or []
+
+
+def consultar_item(item_id, headers):
     try:
         resposta = requests.get(
             f"https://api.mercadolibre.com/items/{item_id}",
@@ -236,6 +260,8 @@ def pegar_item(item_id, headers):
 
     preco = item.get("price")
 
+    original_price = item.get("original_price")
+
     imagem = (
         item.get("secure_thumbnail")
         or item.get("thumbnail")
@@ -253,19 +279,20 @@ def pegar_item(item_id, headers):
     return {
         "item_id": str(item_id),
         "nome": titulo,
-        "preco": formatar_preco(preco),
         "preco_numero": preco,
+        "preco": formatar_preco(preco),
+        "preco_original": original_price,
         "imagem": imagem,
         "link_normal": permalink
     }
 
 
-def consultar_ranking_categoria(category_id, headers):
+def converter_product(product_id, headers):
     try:
         resposta = requests.get(
             (
                 "https://api.mercadolibre.com/"
-                f"highlights/MLB/category/{category_id}"
+                f"products/{product_id}"
             ),
             headers=headers,
             timeout=20
@@ -277,12 +304,80 @@ def consultar_ranking_categoria(category_id, headers):
     if resposta.status_code != 200:
         return None
 
-    dados = resposta.json()
+    produto = resposta.json()
 
-    return dados.get("content") or []
+    if produto.get("status") != "active":
+        return None
+
+    vencedor = produto.get("buy_box_winner") or {}
+
+    item_id = vencedor.get("item_id")
+
+    if not item_id:
+        return None
+
+    oferta = consultar_item(
+        item_id,
+        headers
+    )
+
+    if not oferta:
+        return None
+
+    # O vencedor do catalogo pode trazer
+    # preco/original_price mais atualizados.
+    preco = vencedor.get("price")
+
+    if preco is not None:
+        oferta["preco_numero"] = preco
+        oferta["preco"] = formatar_preco(preco)
+
+    original_price = vencedor.get("original_price")
+
+    if original_price is not None:
+        oferta["preco_original"] = original_price
+
+    oferta["product_id"] = str(product_id)
+
+    return oferta
 
 
-def encontrar_item_mais_vendido(headers):
+def calcular_desconto(preco, original_price):
+    try:
+        preco = float(preco)
+        original_price = float(original_price)
+
+        if original_price <= preco:
+            return None
+
+        desconto = (
+            (original_price - preco)
+            / original_price
+        ) * 100
+
+        return round(desconto)
+
+    except (TypeError, ValueError, ZeroDivisionError):
+        return None
+
+
+def encontrar_mais_vendido(headers):
+    """
+    Procura rankings de varias categorias.
+
+    ITEM:
+        consulta diretamente /items/{id}
+
+    PRODUCT:
+        consulta /products/{id},
+        pega buy_box_winner.item_id
+        e depois consulta o item real.
+
+    USER_PRODUCT:
+        ignorado por enquanto porque sua conversao
+        exige informacoes adicionais do vendedor.
+    """
+
     for termo in TERMOS_CATEGORIAS:
 
         category_id = descobrir_categoria(
@@ -293,7 +388,7 @@ def encontrar_item_mais_vendido(headers):
         if not category_id:
             continue
 
-        ranking = consultar_ranking_categoria(
+        ranking = consultar_ranking(
             category_id,
             headers
         )
@@ -301,10 +396,12 @@ def encontrar_item_mais_vendido(headers):
         if not ranking:
             continue
 
-        # Ranking ja vem com a posicao.
         ranking = sorted(
             ranking,
-            key=lambda x: x.get("position", 999)
+            key=lambda x: x.get(
+                "position",
+                999
+            )
         )
 
         for resultado in ranking:
@@ -313,29 +410,46 @@ def encontrar_item_mais_vendido(headers):
                 resultado.get("type", "")
             ).upper()
 
-            item_id = resultado.get("id")
+            resultado_id = resultado.get("id")
             posicao = resultado.get("position")
 
-            # Primeiro teste:
-            # usamos apenas ITEM porque ele representa
-            # uma publicacao individual.
-            if tipo != "ITEM":
+            if not resultado_id:
                 continue
 
-            if not item_id:
-                continue
+            oferta = None
 
-            oferta = pegar_item(
-                item_id,
-                headers
-            )
+            if tipo == "ITEM":
+                oferta = consultar_item(
+                    resultado_id,
+                    headers
+                )
+
+            elif tipo == "PRODUCT":
+                oferta = converter_product(
+                    resultado_id,
+                    headers
+                )
+
+            elif tipo == "USER_PRODUCT":
+                continue
 
             if not oferta:
                 continue
 
+            oferta["ranking_tipo"] = tipo
+            oferta["ranking_id"] = str(
+                resultado_id
+            )
             oferta["posicao"] = posicao
             oferta["categoria_id"] = category_id
-            oferta["termo_categoria"] = termo
+            oferta["categoria_busca"] = termo
+
+            desconto = calcular_desconto(
+                oferta.get("preco_numero"),
+                oferta.get("preco_original")
+            )
+
+            oferta["desconto"] = desconto
 
             return oferta
 
@@ -354,22 +468,20 @@ def buscar_mais_vendidos():
         "Authorization": f"Bearer {ML_ACCESS_TOKEN}"
     }
 
-    oferta = encontrar_item_mais_vendido(
+    oferta = encontrar_mais_vendido(
         headers
     )
 
     if not oferta:
         return """
-        <h3>Nao encontrei um ITEM direto nos rankings testados.</h3>
+        <h3>
+            Nao encontrei uma publicacao compravel
+            nos rankings testados.
+        </h3>
 
         <p>
-            O ranking respondeu, mas os resultados podem ser
-            PRODUCT ou USER_PRODUCT.
-        </p>
-
-        <p>
-            Nesse caso, a proxima etapa sera converter esses
-            tipos para uma oferta compravel.
+            ITEM e PRODUCT foram testados.
+            USER_PRODUCT ainda nao esta habilitado.
         </p>
         """
 
@@ -382,12 +494,39 @@ def buscar_mais_vendidos():
     imagem = oferta["imagem"]
     link_normal = oferta["link_normal"]
     posicao = oferta.get("posicao", "?")
+    desconto = oferta.get("desconto")
+    categoria = oferta.get(
+        "categoria_busca",
+        ""
+    )
 
     legenda = (
         "🔥 MAIS VENDIDO ENCONTRADO!\n\n"
-        f"🏆 Posicao no ranking: #{posicao}\n\n"
+        f"🏆 Ranking: #{posicao}\n"
+        f"📂 Categoria: {categoria}\n\n"
         f"📦 {nome}\n\n"
-        f"💰 {preco}\n\n"
+    )
+
+    if desconto:
+        legenda += (
+            f"🏷️ DESCONTO: {desconto}% OFF\n"
+        )
+
+        original = formatar_preco(
+            oferta.get("preco_original")
+        )
+
+        legenda += (
+            f"❌ De: {original}\n"
+            f"✅ Por: {preco}\n\n"
+        )
+
+    else:
+        legenda += (
+            f"💰 Preco: {preco}\n\n"
+        )
+
+    legenda += (
         "🔗 LINK DO PRODUTO:\n"
         f"{link_normal}\n\n"
         "👇 Deseja preparar essa oferta?"
@@ -398,11 +537,15 @@ def buscar_mais_vendidos():
             [
                 {
                     "text": "✅ PUBLICAR",
-                    "callback_data": f"publicar:{item_id}"
+                    "callback_data": (
+                        f"publicar:{item_id}"
+                    )
                 },
                 {
                     "text": "❌ IGNORAR",
-                    "callback_data": f"ignorar:{item_id}"
+                    "callback_data": (
+                        f"ignorar:{item_id}"
+                    )
                 }
             ]
         ]
@@ -441,20 +584,34 @@ def buscar_mais_vendidos():
         )
 
     return """
-    <h2>MAIS VENDIDO ENVIADO! 🔥</h2>
+    <h2>OFERTA ENVIADA! 🔥</h2>
+    <p>
+        Encontrei um produto do ranking
+        com publicacao compravel.
+    </p>
     <p>Confira seu Telegram.</p>
     """
 
 
-@app.route("/telegram/webhook", methods=["POST"])
+@app.route(
+    "/telegram/webhook",
+    methods=["POST"]
+)
 def telegram_webhook():
-    update = request.get_json(silent=True) or {}
+    update = request.get_json(
+        silent=True
+    ) or {}
 
-    callback = update.get("callback_query")
+    callback = update.get(
+        "callback_query"
+    )
 
     if callback:
         callback_id = callback.get("id")
-        callback_data = callback.get("data", "")
+        callback_data = callback.get(
+            "data",
+            ""
+        )
 
         mensagem_callback = callback.get(
             "message",
@@ -467,30 +624,38 @@ def telegram_webhook():
             .get("id")
         )
 
-        if str(chat_id) != str(TELEGRAM_CHAT_ID):
+        if str(chat_id) != str(
+            TELEGRAM_CHAT_ID
+        ):
             if callback_id:
                 telegram_api(
                     "answerCallbackQuery",
                     {
-                        "callback_query_id": callback_id,
-                        "text": "Acesso nao autorizado."
+                        "callback_query_id":
+                            callback_id,
+                        "text":
+                            "Acesso nao autorizado."
                     }
                 )
 
             return "OK", 200
 
-        if callback_data.startswith("ignorar:"):
+        if callback_data.startswith(
+            "ignorar:"
+        ):
             item_id = callback_data.split(
                 ":",
                 1
             )[1]
 
-            OFERTAS.pop(item_id, None)
+            OFERTAS.pop(
+                item_id,
+                None
+            )
 
             if AGUARDANDO_LINK.get(
                 str(chat_id)
             ) == item_id:
-
                 AGUARDANDO_LINK.pop(
                     str(chat_id),
                     None
@@ -499,15 +664,18 @@ def telegram_webhook():
             telegram_api(
                 "answerCallbackQuery",
                 {
-                    "callback_query_id": callback_id,
-                    "text": "Oferta ignorada ❌"
+                    "callback_query_id":
+                        callback_id,
+                    "text":
+                        "Oferta ignorada ❌"
                 }
             )
 
             telegram_api(
                 "sendMessage",
                 {
-                    "chat_id": TELEGRAM_CHAT_ID,
+                    "chat_id":
+                        TELEGRAM_CHAT_ID,
                     "text": (
                         "❌ Oferta descartada.\n\n"
                         "Vou deixar essa de fora."
@@ -517,30 +685,37 @@ def telegram_webhook():
 
             return "OK", 200
 
-        if callback_data.startswith("publicar:"):
+        if callback_data.startswith(
+            "publicar:"
+        ):
             item_id = callback_data.split(
                 ":",
                 1
             )[1]
 
-            oferta = OFERTAS.get(item_id)
+            oferta = OFERTAS.get(
+                item_id
+            )
 
             if not oferta:
                 telegram_api(
                     "answerCallbackQuery",
                     {
-                        "callback_query_id": callback_id,
-                        "text": "Oferta expirou."
+                        "callback_query_id":
+                            callback_id,
+                        "text":
+                            "Oferta expirou."
                     }
                 )
 
                 telegram_api(
                     "sendMessage",
                     {
-                        "chat_id": TELEGRAM_CHAT_ID,
+                        "chat_id":
+                            TELEGRAM_CHAT_ID,
                         "text": (
-                            "⚠️ Essa oferta nao esta mais "
-                            "na memoria.\n\n"
+                            "⚠️ Essa oferta "
+                            "nao esta mais na memoria.\n\n"
                             "Busque uma nova."
                         )
                     }
@@ -557,8 +732,10 @@ def telegram_webhook():
                 telegram_api(
                     "answerCallbackQuery",
                     {
-                        "callback_query_id": callback_id,
-                        "text": "Link nao encontrado."
+                        "callback_query_id":
+                            callback_id,
+                        "text":
+                            "Link nao encontrado."
                     }
                 )
 
@@ -571,23 +748,28 @@ def telegram_webhook():
             telegram_api(
                 "answerCallbackQuery",
                 {
-                    "callback_query_id": callback_id,
-                    "text": "Oferta aprovada! ✅"
+                    "callback_query_id":
+                        callback_id,
+                    "text":
+                        "Oferta aprovada! ✅"
                 }
             )
 
             telegram_api(
                 "sendMessage",
                 {
-                    "chat_id": TELEGRAM_CHAT_ID,
+                    "chat_id":
+                        TELEGRAM_CHAT_ID,
                     "text": (
                         "💰 OFERTA APROVADA!\n\n"
                         "🔗 COPIE ESTE LINK:\n\n"
                         f"{link_normal}\n\n"
-                        "Coloque esse link no Gerador "
-                        "de Links do Mercado Livre.\n\n"
-                        "Depois envie aqui para o bot "
-                        "o link de afiliado gerado. 👇"
+                        "Coloque esse link no "
+                        "Gerador de Links do "
+                        "Mercado Livre.\n\n"
+                        "Depois mande aqui para "
+                        "o bot o link de afiliado "
+                        "gerado. 👇"
                     )
                 }
             )
@@ -608,7 +790,9 @@ def telegram_webhook():
             ""
         ).strip()
 
-        if str(chat_id) != str(TELEGRAM_CHAT_ID):
+        if str(chat_id) != str(
+            TELEGRAM_CHAT_ID
+        ):
             return "OK", 200
 
         item_id = AGUARDANDO_LINK.get(
@@ -625,7 +809,8 @@ def telegram_webhook():
             telegram_api(
                 "sendMessage",
                 {
-                    "chat_id": TELEGRAM_CHAT_ID,
+                    "chat_id":
+                        TELEGRAM_CHAT_ID,
                     "text": (
                         "⚠️ Cole o link completo "
                         "gerado pelo Mercado Livre."
@@ -635,7 +820,9 @@ def telegram_webhook():
 
             return "OK", 200
 
-        oferta = OFERTAS.get(item_id)
+        oferta = OFERTAS.get(
+            item_id
+        )
 
         if not oferta:
             AGUARDANDO_LINK.pop(
@@ -646,7 +833,8 @@ def telegram_webhook():
             telegram_api(
                 "sendMessage",
                 {
-                    "chat_id": TELEGRAM_CHAT_ID,
+                    "chat_id":
+                        TELEGRAM_CHAT_ID,
                     "text": (
                         "⚠️ Essa oferta expirou.\n\n"
                         "Busque uma nova oferta."
@@ -656,7 +844,8 @@ def telegram_webhook():
 
             return "OK", 200
 
-        # Guarda exatamente o link enviado.
+        # Usa exatamente o link que voce
+        # enviar para o bot.
         oferta["link_afiliado"] = texto
 
         AGUARDANDO_LINK.pop(
@@ -667,13 +856,16 @@ def telegram_webhook():
         telegram_api(
             "sendMessage",
             {
-                "chat_id": TELEGRAM_CHAT_ID,
+                "chat_id":
+                    TELEGRAM_CHAT_ID,
                 "text": (
                     "✅ LINK RECEBIDO!\n\n"
                     f"📦 {oferta['nome']}\n\n"
                     f"💰 {oferta['preco']}\n\n"
-                    "🔗 Link associado a oferta.\n\n"
-                    "🔒 Ainda NAO publiquei no canal."
+                    "🔗 Link associado "
+                    "a oferta.\n\n"
+                    "🔒 Ainda NAO publiquei "
+                    "no canal."
                 )
             }
         )
