@@ -9,7 +9,9 @@ CLIENT_SECRET = os.environ.get("ML_CLIENT_SECRET", "").strip()
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
 
-REDIRECT_URI = "https://ofertas-mercado-livre-bot.onrender.com/oauth/callback"
+BASE_URL = "https://ofertas-mercado-livre-bot.onrender.com"
+REDIRECT_URI = f"{BASE_URL}/oauth/callback"
+WEBHOOK_URL = f"{BASE_URL}/telegram/webhook"
 
 ML_ACCESS_TOKEN = None
 
@@ -40,6 +42,43 @@ def home():
             2 - Buscar produto
         </a>
     </p>
+
+    <p>
+        <a href="/configurar-webhook">
+            3 - Configurar Webhook do Telegram
+        </a>
+    </p>
+    """
+
+
+@app.route("/configurar-webhook")
+def configurar_webhook():
+    if not TELEGRAM_BOT_TOKEN:
+        return "Token do Telegram nao configurado."
+
+    try:
+        response = telegram_api(
+            "setWebhook",
+            {
+                "url": WEBHOOK_URL,
+                "allowed_updates": ["callback_query"]
+            }
+        )
+
+    except requests.RequestException:
+        return "Erro de conexao ao configurar webhook."
+
+    if response.status_code != 200:
+        return "Erro ao configurar webhook."
+
+    dados = response.json()
+
+    if not dados.get("ok"):
+        return "Telegram nao aceitou o webhook."
+
+    return """
+    <h2>WEBHOOK CONFIGURADO! ✅</h2>
+    <p>Agora os botoes do Telegram podem avisar nosso servidor.</p>
     """
 
 
@@ -260,7 +299,6 @@ def buscar_produto():
 @app.route("/telegram/webhook", methods=["POST"])
 def telegram_webhook():
     update = request.get_json(silent=True) or {}
-
     callback = update.get("callback_query")
 
     if not callback:
@@ -276,7 +314,6 @@ def telegram_webhook():
         .get("id")
     )
 
-    # Somente voce pode usar os botoes de aprovacao
     if str(usuario_chat_id) != str(TELEGRAM_CHAT_ID):
 
         if callback_id:
@@ -340,9 +377,10 @@ def telegram_webhook():
             {
                 "chat_id": TELEGRAM_CHAT_ID,
                 "text": (
-                    "💰 Antes de publicar, precisamos usar "
-                    "seu link de afiliado.\n\n"
-                    "Por enquanto NAO vou publicar o link normal."
+                    "💰 Essa oferta foi aprovada!\n\n"
+                    "Antes de publicar no canal, precisamos "
+                    "colocar seu link de afiliado.\n\n"
+                    "🔒 Nao vou publicar o link normal."
                 )
             }
         )
