@@ -298,12 +298,7 @@ def consultar_item(item_id, headers):
 
 
 def converter_product(product_id, headers, profundidade=0):
-    """Converte PRODUCT em ITEM compravel pelo buy_box_winner.
-
-    Se o ranking apontar para um produto pai, testa poucos filhos terminais.
-    A documentacao do Mercado Livre informa que produtos pai podem nao ser
-    compraveis e que o buy_box_winner de um produto terminal traz o item_id.
-    """
+    """Converte PRODUCT em ITEM compravel sem varrer indefinidamente."""
     try:
         resposta = requests.get(
             f"https://api.mercadolibre.com/products/{product_id}",
@@ -321,7 +316,7 @@ def converter_product(product_id, headers, profundidade=0):
     except ValueError:
         return None
 
-    if produto.get("status") != "active":
+    if produto.get("status") not in (None, "active"):
         return None
 
     vencedor = produto.get("buy_box_winner") or {}
@@ -342,13 +337,44 @@ def converter_product(product_id, headers, profundidade=0):
             oferta["product_id"] = str(product_id)
             return oferta
 
-    # Produto pai: filhos mais especificos podem ter buy box compravel.
-    if profundidade == 0:
-        filhos = produto.get("children_ids") or []
-        for filho in filhos[:6]:
-            oferta = converter_product(filho, headers, profundidade=1)
-            if oferta:
-                return oferta
+    if profundidade > 0:
+        return None
+
+    filhos = produto.get("children_ids") or []
+
+    if not filhos:
+        try:
+            resp_filhos = requests.get(
+                f"https://api.mercadolibre.com/products/{product_id}/children",
+                headers=headers,
+                timeout=3,
+            )
+            if resp_filhos.status_code == 200:
+                dados_filhos = resp_filhos.json()
+                if isinstance(dados_filhos, list):
+                    filhos = [
+                        f.get("id") if isinstance(f, dict) else f
+                        for f in dados_filhos
+                    ]
+                elif isinstance(dados_filhos, dict):
+                    conteudo = (
+                        dados_filhos.get("results")
+                        or dados_filhos.get("children")
+                        or []
+                    )
+                    filhos = [
+                        f.get("id") if isinstance(f, dict) else f
+                        for f in conteudo
+                    ]
+        except (requests.RequestException, ValueError):
+            filhos = []
+
+    filhos = [f for f in filhos if f]
+
+    for filho in filhos[:8]:
+        oferta = converter_product(filho, headers, profundidade=1)
+        if oferta:
+            return oferta
 
     return None
 
