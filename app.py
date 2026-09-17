@@ -298,7 +298,12 @@ def consultar_item(item_id, headers):
 
 
 def converter_product(product_id, headers, profundidade=0):
-    """Converte PRODUCT em ITEM compravel sem varrer indefinidamente."""
+    """Converte PRODUCT em ITEM compravel pelo buy_box_winner.
+
+    Se o ranking apontar para um produto pai, testa poucos filhos terminais.
+    A documentacao do Mercado Livre informa que produtos pai podem nao ser
+    compraveis e que o buy_box_winner de um produto terminal traz o item_id.
+    """
     try:
         resposta = requests.get(
             f"https://api.mercadolibre.com/products/{product_id}",
@@ -316,7 +321,7 @@ def converter_product(product_id, headers, profundidade=0):
     except ValueError:
         return None
 
-    if produto.get("status") not in (None, "active"):
+    if produto.get("status") != "active":
         return None
 
     vencedor = produto.get("buy_box_winner") or {}
@@ -337,44 +342,13 @@ def converter_product(product_id, headers, profundidade=0):
             oferta["product_id"] = str(product_id)
             return oferta
 
-    if profundidade > 0:
-        return None
-
-    filhos = produto.get("children_ids") or []
-
-    if not filhos:
-        try:
-            resp_filhos = requests.get(
-                f"https://api.mercadolibre.com/products/{product_id}/children",
-                headers=headers,
-                timeout=3,
-            )
-            if resp_filhos.status_code == 200:
-                dados_filhos = resp_filhos.json()
-                if isinstance(dados_filhos, list):
-                    filhos = [
-                        f.get("id") if isinstance(f, dict) else f
-                        for f in dados_filhos
-                    ]
-                elif isinstance(dados_filhos, dict):
-                    conteudo = (
-                        dados_filhos.get("results")
-                        or dados_filhos.get("children")
-                        or []
-                    )
-                    filhos = [
-                        f.get("id") if isinstance(f, dict) else f
-                        for f in conteudo
-                    ]
-        except (requests.RequestException, ValueError):
-            filhos = []
-
-    filhos = [f for f in filhos if f]
-
-    for filho in filhos[:8]:
-        oferta = converter_product(filho, headers, profundidade=1)
-        if oferta:
-            return oferta
+    # Produto pai: filhos mais especificos podem ter buy box compravel.
+    if profundidade == 0:
+        filhos = produto.get("children_ids") or []
+        for filho in filhos[:6]:
+            oferta = converter_product(filho, headers, profundidade=1)
+            if oferta:
+                return oferta
 
     return None
 
@@ -602,21 +576,13 @@ def converter_user_product(user_product_id, headers):
     return None
 
 def encontrar_mais_vendido(headers):
-    """Procura um anuncio compravel sem estourar o worker do Render.
-
-    Prioriza ITEM e PRODUCT do ranking. USER_PRODUCT fica por ultimo porque
-    a busca por user_product_id e vinculada ao seller e pode negar acesso
-    para vendedores terceiros. Os candidatos sao testados em paralelo.
-    """
+    """Busca curta: no maximo ~12 segundos, sem USER_PRODUCT lento."""
     inicio = time.monotonic()
-    limite_segundos = 20
-    candidatos = []
+    limite_segundos = 12
 
-    # Coleta rankings rapidamente. Nao para nos primeiros 6 resultados:
-    # em 2026 muitos rankings comecam com varios USER_PRODUCT seguidos.
-    for termo in TERMOS_CATEGORIAS[:5]:
-        if time.monotonic() - inicio >= 9:
-            break
+    for termo in TERMOS_CATEGORIAS[:3]:
+        if time.monotonic() - inicio >= limite_segundos:
+            return None
 
         category_id = descobrir_categoria(termo, headers)
         if not category_id:
@@ -625,66 +591,61 @@ def encontrar_mais_vendido(headers):
         ranking = consultar_ranking(category_id, headers)
         print(f"RANKING {termo} {category_id}: {len(ranking)} resultados")
 
-        for posicao, entrada in enumerate(ranking[:20], start=1):
+        # Só testa caminhos que podem virar anúncio diretamente.
+        candidatos = []
+        for posicao, entrada in enumerate(ranking[:10], start=1):
             tipo = str(entrada.get("type") or "").upper()
             identificador = entrada.get("id")
-            if identificador and tipo in {"ITEM", "PRODUCT", "USER_PRODUCT"}:
-                candidatos.append((tipo, identificador, posicao, termo))
+            if identificador and tipo in {"ITEM", "PRODUCT"}:
+                candidatos.append((tipo, identificador, posicao))
 
-    if not candidatos:
-        return None
+        if not candidatos:
+            continue
 
-    # ITEM/PRODUCT primeiro: sao os caminhos documentados que entregam
-    # publicacao/permalink ou buy_box_winner diretamente.
-    diretos = [c for c in candidatos if c[0] in {"ITEM", "PRODUCT"}]
-    ups = [c for c in candidatos if c[0] == "USER_PRODUCT"]
+        def testar(candidato):
+            tipo, identificador, posicao = candidato
+            if time.monotonic() - inicio >= limite_segundos:
+                return None
 
-    def testar(candidato):
-        tipo, identificador, posicao, termo = candidato
-        try:
-            if tipo == "ITEM":
-                oferta = consultar_item(identificador, headers)
-            elif tipo == "PRODUCT":
-                oferta = converter_product(identificador, headers)
-            else:
-                oferta = converter_user_product(identificador, headers)
-        except Exception as erro:
-            print(f"ERRO candidato {tipo} {identificador}: {erro}")
-            return None
+            try:
+                if tipo == "ITEM":
+                    oferta = consultar_item(identificador, headers)
+                else:
+                    oferta = converter_product(identificador, headers)
+            except Exception as erro:
+                print(f"ERRO candidato {tipo} {identificador}: {erro}")
+                return None
 
-        if not oferta:
-            return None
+            if not oferta:
+                return None
 
-        oferta["posicao"] = posicao
-        oferta["categoria_busca"] = termo
-        oferta["tipo_ranking"] = tipo
-        oferta["desconto"] = calcular_desconto(
-            oferta.get("preco_numero"),
-            oferta.get("preco_original"),
-        )
-        return oferta
-
-    # Testa varios ITEM/PRODUCT simultaneamente para caber no limite do Render.
-    if diretos:
-        with ThreadPoolExecutor(max_workers=6) as executor:
-            futuros = [executor.submit(testar, c) for c in diretos[:24]]
-            for futuro in as_completed(futuros):
-                if time.monotonic() - inicio >= limite_segundos:
-                    break
-                oferta = futuro.result()
-                if oferta:
-                    for f in futuros:
-                        f.cancel()
-                    return oferta
-
-    # Se o ranking for praticamente todo USER_PRODUCT, tenta poucos UPs.
-    # A API oficial exige seller_id para converter UP -> item_id.
-    for candidato in ups[:3]:
-        if time.monotonic() - inicio >= limite_segundos:
-            break
-        oferta = testar(candidato)
-        if oferta:
+            oferta["posicao"] = posicao
+            oferta["categoria_busca"] = termo
+            oferta["tipo_ranking"] = tipo
+            oferta["desconto"] = calcular_desconto(
+                oferta.get("preco_numero"),
+                oferta.get("preco_original"),
+            )
             return oferta
+
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            futuros = [executor.submit(testar, c) for c in candidatos[:8]]
+
+            try:
+                for futuro in as_completed(futuros, timeout=8):
+                    if time.monotonic() - inicio >= limite_segundos:
+                        break
+
+                    oferta = futuro.result()
+                    if oferta:
+                        for f in futuros:
+                            f.cancel()
+                        return oferta
+            except TimeoutError:
+                print(f"LIMITE atingido na categoria {termo}")
+
+            for f in futuros:
+                f.cancel()
 
     return None
 
@@ -723,8 +684,7 @@ def buscar_mais_vendidos():
         </h3>
 
         <p>
-            ITEM, PRODUCT e USER_PRODUCT foram testados
-            dentro do limite rapido desta busca.
+            ITEM e PRODUCT foram testados dentro do limite rapido. USER_PRODUCT foi ignorado para evitar o bloqueio 403 e a demora.
         </p>
         """
 
