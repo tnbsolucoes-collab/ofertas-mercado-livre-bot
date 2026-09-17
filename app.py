@@ -12,6 +12,7 @@ CLIENT_SECRET = os.environ.get("ML_CLIENT_SECRET", "").strip()
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
 TELEGRAM_CHANNEL_ID = os.environ.get("TELEGRAM_CHANNEL_ID", "@TNBofertasMercadoLivreBR").strip()
+CRON_SECRET = os.environ.get("CRON_SECRET", "").strip()
 
 BASE_URL = "https://ofertas-mercado-livre-bot.onrender.com"
 REDIRECT_URI = f"{BASE_URL}/oauth/callback"
@@ -743,6 +744,24 @@ def status():
         "telegram_chat_configurado": bool(TELEGRAM_CHAT_ID),
         "redirect_uri": REDIRECT_URI,
     }
+
+
+
+@app.route("/cron/buscar-oferta")
+def cron_buscar_oferta():
+    if not CRON_SECRET:
+        return "CRON_SECRET nao configurado.", 503
+
+    autorizacao = request.headers.get("Authorization", "")
+    esperado = f"Bearer {CRON_SECRET}"
+
+    if autorizacao != esperado:
+        return "Nao autorizado.", 401
+
+    if not ML_ACCESS_TOKEN:
+        return "Mercado Livre precisa ser reconectado.", 503
+
+    return buscar_mais_vendidos()
 
 
 @app.route("/buscar-mais-vendidos")
