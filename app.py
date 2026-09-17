@@ -6,9 +6,11 @@ app = Flask(__name__)
 
 CLIENT_ID = os.environ.get("ML_CLIENT_ID", "").strip()
 CLIENT_SECRET = os.environ.get("ML_CLIENT_SECRET", "").strip()
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 
 print("ML_CLIENT_ID carregado:", bool(CLIENT_ID))
 print("ML_CLIENT_SECRET carregado:", bool(CLIENT_SECRET))
+print("TELEGRAM_BOT_TOKEN carregado:", bool(TELEGRAM_BOT_TOKEN))
 print("Tamanho do CLIENT_ID:", len(CLIENT_ID))
 print("Tamanho do CLIENT_SECRET:", len(CLIENT_SECRET))
 
@@ -19,7 +21,8 @@ REDIRECT_URI = "https://ofertas-mercado-livre-bot.onrender.com/oauth/callback"
 def home():
     return """
     <h2>Bot Ofertas Mercado Livre BR - Online!</h2>
-    <a href="/login">Conectar com Mercado Livre</a>
+    <p><a href="/login">Conectar com Mercado Livre</a></p>
+    <p><a href="/telegram-test">Testar Telegram</a></p>
     """
 
 
@@ -68,6 +71,23 @@ def oauth_callback():
     print("User ID recebido:", user_id)
 
     return "Mercado Livre conectado com sucesso!"
+
+
+@app.route("/telegram-test")
+def telegram_test():
+    if not TELEGRAM_BOT_TOKEN:
+        return "TELEGRAM_BOT_TOKEN nao configurado."
+
+    response = requests.get(
+        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
+    )
+
+    if response.status_code != 200:
+        return f"Erro Telegram: {response.text}"
+
+    data = response.json()
+
+    return str(data)
 
 
 if __name__ == "__main__":
