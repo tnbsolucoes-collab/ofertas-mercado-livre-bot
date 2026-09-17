@@ -12,13 +12,31 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
 REDIRECT_URI = "https://ofertas-mercado-livre-bot.onrender.com/oauth/callback"
 
 
+def enviar_telegram(texto):
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": texto
+    }
+
+    return requests.post(url, json=payload, timeout=15)
+
+
 @app.route("/")
 def home():
     return """
     <h2>Bot Ofertas Mercado Livre BR - Online!</h2>
+
     <p><a href="/login">Conectar com Mercado Livre</a></p>
-    <p><a href="/telegram-test">Verificar mensagens recebidas</a></p>
-    <p><a href="/enviar-teste">Enviar mensagem de teste</a></p>
+
+    <p><a href="/enviar-teste">
+    Testar Telegram
+    </a></p>
+
+    <p><a href="/buscar-produto">
+    Buscar produto no Mercado Livre
+    </a></p>
     """
 
 
@@ -51,7 +69,11 @@ def oauth_callback():
         "redirect_uri": REDIRECT_URI,
     }
 
-    response = requests.post(token_url, data=data, timeout=10)
+    response = requests.post(
+        token_url,
+        data=data,
+        timeout=15
+    )
 
     if response.status_code != 200:
         return "Erro ao obter autorizacao do Mercado Livre."
@@ -69,57 +91,92 @@ def oauth_callback():
     return "Mercado Livre conectado com sucesso!"
 
 
-@app.route("/telegram-test")
-def telegram_test():
-    if not TELEGRAM_BOT_TOKEN:
-        return "TELEGRAM_BOT_TOKEN nao configurado."
+@app.route("/enviar-teste")
+def enviar_teste():
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        return "Telegram nao configurado."
 
-    response = requests.get(
-        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates",
-        timeout=10
+    response = enviar_telegram(
+        "🚀 Bot Ofertas Mercado Livre BR\n\n"
+        "✅ Telegram funcionando!"
     )
 
     if response.status_code != 200:
-        return "Erro ao consultar o Telegram."
-
-    data = response.json()
-
-    for update in reversed(data.get("result", [])):
-        message = update.get("message")
-
-        if message and message.get("chat", {}).get("type") == "private":
-            return f"Telegram conectado. Chat ID: {message['chat']['id']}"
-
-    return "Telegram conectado, mas nenhuma mensagem privada foi encontrada."
-
-
-@app.route("/enviar-teste")
-def enviar_teste():
-    if not TELEGRAM_BOT_TOKEN:
-        return "TELEGRAM_BOT_TOKEN nao configurado."
-
-    if not TELEGRAM_CHAT_ID:
-        return "TELEGRAM_CHAT_ID nao configurado."
-
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-
-    payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": (
-            "🚀 Bot Ofertas Mercado Livre BR\n\n"
-            "✅ Telegram conectado com sucesso!\n\n"
-            "Agora o servidor ja consegue enviar mensagens para voce."
-        )
-    }
-
-    response = requests.post(url, json=payload, timeout=10)
-
-    if response.status_code != 200:
-        return "Erro ao enviar mensagem para o Telegram."
+        return "Erro ao enviar mensagem."
 
     return "Mensagem enviada! Confira seu Telegram."
 
 
+@app.route("/buscar-produto")
+def buscar_produto():
+    termo = request.args.get("q", "smartphone")
+
+    url = "https://api.mercadolibre.com/sites/MLB/search"
+
+    try:
+        response = requests.get(
+            url,
+            params={
+                "q": termo,
+                "limit": 10
+            },
+            timeout=15
+        )
+    except requests.RequestException:
+        return "Erro de conexao com o Mercado Livre."
+
+    if response.status_code != 200:
+        return (
+            "Mercado Livre nao permitiu a busca. "
+            f"Codigo: {response.status_code}"
+        )
+
+    dados = response.json()
+    produtos = dados.get("results", [])
+
+    if not produtos:
+        return "Nenhum produto encontrado."
+
+    produto = produtos[0]
+
+    titulo = produto.get("title", "Produto")
+    preco = produto.get("price")
+    link = produto.get("permalink", "")
+
+    if preco is None:
+        preco_texto = "Preco nao informado"
+    else:
+        preco_texto = f"R$ {preco:,.2f}"
+        preco_texto = (
+            preco_texto
+            .replace(",", "X")
+            .replace(".", ",")
+            .replace("X", ".")
+        )
+
+    mensagem = (
+        "🔥 OFERTA ENCONTRADA\n\n"
+        f"📦 {titulo}\n\n"
+        f"💰 {preco_texto}\n\n"
+        f"🔗 {link}\n\n"
+        "🧪 Este e apenas o primeiro teste."
+    )
+
+    telegram = enviar_telegram(mensagem)
+
+    if telegram.status_code != 200:
+        return "Produto encontrado, mas houve erro ao enviar ao Telegram."
+
+    return (
+        "Produto encontrado e enviado! "
+        "Confira seu Telegram."
+    )
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+
+    app.run(
+        host="0.0.0.0",
+        port=port
+    )
