@@ -1,6 +1,7 @@
 from flask import Flask, request, redirect
 import os
 import requests
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
 
 app = Flask(__name__)
@@ -296,60 +297,60 @@ def consultar_item(item_id, headers):
     }
 
 
-def converter_product(product_id, headers):
+def converter_product(product_id, headers, profundidade=0):
+    """Converte PRODUCT em ITEM compravel pelo buy_box_winner.
+
+    Se o ranking apontar para um produto pai, testa poucos filhos terminais.
+    A documentacao do Mercado Livre informa que produtos pai podem nao ser
+    compraveis e que o buy_box_winner de um produto terminal traz o item_id.
+    """
     try:
         resposta = requests.get(
-            (
-                "https://api.mercadolibre.com/"
-                f"products/{product_id}"
-            ),
+            f"https://api.mercadolibre.com/products/{product_id}",
             headers=headers,
-            timeout=4
+            timeout=3,
         )
-
     except requests.RequestException:
         return None
 
     if resposta.status_code != 200:
         return None
 
-    produto = resposta.json()
+    try:
+        produto = resposta.json()
+    except ValueError:
+        return None
 
     if produto.get("status") != "active":
         return None
 
     vencedor = produto.get("buy_box_winner") or {}
-
     item_id = vencedor.get("item_id")
 
-    if not item_id:
-        return None
+    if item_id:
+        oferta = consultar_item(item_id, headers)
+        if oferta:
+            preco = vencedor.get("price")
+            if preco is not None:
+                oferta["preco_numero"] = preco
+                oferta["preco"] = formatar_preco(preco)
 
-    oferta = consultar_item(
-        item_id,
-        headers
-    )
+            original_price = vencedor.get("original_price")
+            if original_price is not None:
+                oferta["preco_original"] = original_price
 
-    if not oferta:
-        return None
+            oferta["product_id"] = str(product_id)
+            return oferta
 
-    # O vencedor do catalogo pode trazer
-    # preco/original_price mais atualizados.
-    preco = vencedor.get("price")
+    # Produto pai: filhos mais especificos podem ter buy box compravel.
+    if profundidade == 0:
+        filhos = produto.get("children_ids") or []
+        for filho in filhos[:6]:
+            oferta = converter_product(filho, headers, profundidade=1)
+            if oferta:
+                return oferta
 
-    if preco is not None:
-        oferta["preco_numero"] = preco
-        oferta["preco"] = formatar_preco(preco)
-
-    original_price = vencedor.get("original_price")
-
-    if original_price is not None:
-        oferta["preco_original"] = original_price
-
-    oferta["product_id"] = str(product_id)
-
-    return oferta
-
+    return None
 
 def calcular_desconto(preco, original_price):
     try:
@@ -575,61 +576,88 @@ def converter_user_product(user_product_id, headers):
     return None
 
 def encontrar_mais_vendido(headers):
-    """Busca rapida para nao estourar o timeout do Gunicorn/Render."""
-    inicio = time.monotonic()
-    limite_segundos = 18
-    candidatos_testados = 0
-    max_candidatos = 6
+    """Procura um anuncio compravel sem estourar o worker do Render.
 
-    # Poucas categorias por requisicao. Outras podem ser testadas
-    # em uma nova chamada, sem prender o worker por muito tempo.
-    for termo in TERMOS_CATEGORIAS[:4]:
-        if time.monotonic() - inicio >= limite_segundos:
-            print("BUSCA ENCERRADA PELO LIMITE DE TEMPO")
+    Prioriza ITEM e PRODUCT do ranking. USER_PRODUCT fica por ultimo porque
+    a busca por user_product_id e vinculada ao seller e pode negar acesso
+    para vendedores terceiros. Os candidatos sao testados em paralelo.
+    """
+    inicio = time.monotonic()
+    limite_segundos = 20
+    candidatos = []
+
+    # Coleta rankings rapidamente. Nao para nos primeiros 6 resultados:
+    # em 2026 muitos rankings comecam com varios USER_PRODUCT seguidos.
+    for termo in TERMOS_CATEGORIAS[:5]:
+        if time.monotonic() - inicio >= 9:
             break
 
         category_id = descobrir_categoria(termo, headers)
         if not category_id:
-            print(f"SEM CATEGORIA: {termo}")
             continue
 
         ranking = consultar_ranking(category_id, headers)
         print(f"RANKING {termo} {category_id}: {len(ranking)} resultados")
 
-        for posicao, entrada in enumerate(ranking[:8], start=1):
-            if time.monotonic() - inicio >= limite_segundos:
-                print("BUSCA ENCERRADA PELO LIMITE DE TEMPO")
-                return None
-            if candidatos_testados >= max_candidatos:
-                print("BUSCA ENCERRADA PELO LIMITE DE CANDIDATOS")
-                return None
-
+        for posicao, entrada in enumerate(ranking[:20], start=1):
             tipo = str(entrada.get("type") or "").upper()
             identificador = entrada.get("id")
-            if not identificador:
-                continue
+            if identificador and tipo in {"ITEM", "PRODUCT", "USER_PRODUCT"}:
+                candidatos.append((tipo, identificador, posicao, termo))
 
-            candidatos_testados += 1
-            print(f"TESTE #{candidatos_testados}: {tipo} {identificador}")
+    if not candidatos:
+        return None
 
-            oferta = None
+    # ITEM/PRODUCT primeiro: sao os caminhos documentados que entregam
+    # publicacao/permalink ou buy_box_winner diretamente.
+    diretos = [c for c in candidatos if c[0] in {"ITEM", "PRODUCT"}]
+    ups = [c for c in candidatos if c[0] == "USER_PRODUCT"]
+
+    def testar(candidato):
+        tipo, identificador, posicao, termo = candidato
+        try:
             if tipo == "ITEM":
                 oferta = consultar_item(identificador, headers)
             elif tipo == "PRODUCT":
                 oferta = converter_product(identificador, headers)
-            elif tipo == "USER_PRODUCT":
+            else:
                 oferta = converter_user_product(identificador, headers)
+        except Exception as erro:
+            print(f"ERRO candidato {tipo} {identificador}: {erro}")
+            return None
 
-            if not oferta:
-                continue
+        if not oferta:
+            return None
 
-            oferta["posicao"] = posicao
-            oferta["categoria_busca"] = termo
-            oferta["tipo_ranking"] = tipo
-            oferta["desconto"] = calcular_desconto(
-                oferta.get("preco_numero"),
-                oferta.get("preco_original"),
-            )
+        oferta["posicao"] = posicao
+        oferta["categoria_busca"] = termo
+        oferta["tipo_ranking"] = tipo
+        oferta["desconto"] = calcular_desconto(
+            oferta.get("preco_numero"),
+            oferta.get("preco_original"),
+        )
+        return oferta
+
+    # Testa varios ITEM/PRODUCT simultaneamente para caber no limite do Render.
+    if diretos:
+        with ThreadPoolExecutor(max_workers=6) as executor:
+            futuros = [executor.submit(testar, c) for c in diretos[:24]]
+            for futuro in as_completed(futuros):
+                if time.monotonic() - inicio >= limite_segundos:
+                    break
+                oferta = futuro.result()
+                if oferta:
+                    for f in futuros:
+                        f.cancel()
+                    return oferta
+
+    # Se o ranking for praticamente todo USER_PRODUCT, tenta poucos UPs.
+    # A API oficial exige seller_id para converter UP -> item_id.
+    for candidato in ups[:3]:
+        if time.monotonic() - inicio >= limite_segundos:
+            break
+        oferta = testar(candidato)
+        if oferta:
             return oferta
 
     return None
