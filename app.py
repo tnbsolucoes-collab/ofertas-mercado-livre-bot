@@ -254,8 +254,102 @@ def buscar_produto():
     return """
     <h2>OFERTA ENVIADA! 🚀</h2>
     <p>Confira seu Telegram.</p>
-    <p>Agora a oferta possui os botoes de aprovacao.</p>
     """
+
+
+@app.route("/telegram/webhook", methods=["POST"])
+def telegram_webhook():
+    update = request.get_json(silent=True) or {}
+
+    callback = update.get("callback_query")
+
+    if not callback:
+        return "OK", 200
+
+    callback_id = callback.get("id")
+    dados = callback.get("data", "")
+
+    usuario_chat_id = (
+        callback
+        .get("message", {})
+        .get("chat", {})
+        .get("id")
+    )
+
+    # Somente voce pode usar os botoes de aprovacao
+    if str(usuario_chat_id) != str(TELEGRAM_CHAT_ID):
+
+        if callback_id:
+            telegram_api(
+                "answerCallbackQuery",
+                {
+                    "callback_query_id": callback_id,
+                    "text": "Acesso nao autorizado."
+                }
+            )
+
+        return "OK", 200
+
+    if dados.startswith("ignorar:"):
+
+        telegram_api(
+            "answerCallbackQuery",
+            {
+                "callback_query_id": callback_id,
+                "text": "Oferta ignorada ❌"
+            }
+        )
+
+        mensagem = callback.get("message", {})
+        message_id = mensagem.get("message_id")
+
+        if message_id:
+            telegram_api(
+                "editMessageReplyMarkup",
+                {
+                    "chat_id": TELEGRAM_CHAT_ID,
+                    "message_id": message_id,
+                    "reply_markup": {
+                        "inline_keyboard": []
+                    }
+                }
+            )
+
+        telegram_api(
+            "sendMessage",
+            {
+                "chat_id": TELEGRAM_CHAT_ID,
+                "text": "❌ Oferta descartada. Vou deixar essa de fora."
+            }
+        )
+
+        return "OK", 200
+
+    if dados.startswith("publicar:"):
+
+        telegram_api(
+            "answerCallbackQuery",
+            {
+                "callback_query_id": callback_id,
+                "text": "Falta o link de afiliado 💰"
+            }
+        )
+
+        telegram_api(
+            "sendMessage",
+            {
+                "chat_id": TELEGRAM_CHAT_ID,
+                "text": (
+                    "💰 Antes de publicar, precisamos usar "
+                    "seu link de afiliado.\n\n"
+                    "Por enquanto NAO vou publicar o link normal."
+                )
+            }
+        )
+
+        return "OK", 200
+
+    return "OK", 200
 
 
 if __name__ == "__main__":
