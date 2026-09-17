@@ -426,97 +426,97 @@ def consultar_item_publico(item_id):
     }
 
 
-def buscar_oferta_publica():
-    """
-    Busca ofertas pela busca publica do Mercado Livre.
-    Nao envia o access token nessas consultas, evitando o
-    403 PolicyAgent visto nos logs.
-    """
-    termos = [
-        "smartphone",
-        "fone bluetooth",
-        "smart tv",
-        "notebook",
-        "tenis",
-        "perfume",
-        "air fryer",
-        "relogio",
-        "caixa de som",
-        "aspirador",
-        "mochila",
-        "creatina",
-        "teclado",
-        "mouse",
-    ]
-
-    for termo in termos:
-        try:
-            resposta = requests.get(
-                "https://api.mercadolibre.com/sites/MLB/search",
-                params={
-                    "q": termo,
-                    "limit": 50,
-                    "sort": "relevance",
-                },
-                timeout=20,
-            )
-        except requests.RequestException as erro:
-            print(f"ERRO busca publica {termo}: {erro}")
-            continue
-
-        print(
-            f"BUSCA PUBLICA {termo}: "
-            f"{resposta.status_code}"
+def converter_user_product(user_product_id, headers):
+    """Converte um USER_PRODUCT do ranking em um item compravel."""
+    try:
+        resposta = requests.get(
+            f"https://api.mercadolibre.com/user-products/{user_product_id}",
+            headers=headers,
+            timeout=20,
         )
+    except requests.RequestException as erro:
+        print(f"ERRO USER_PRODUCT {user_product_id}: {erro}")
+        return None
 
-        if resposta.status_code != 200:
-            print(
-                f"ERRO busca {termo} {resposta.status_code} "
-                f"{resposta.text[:500]}"
-            )
+    print(f"USER_PRODUCT {user_product_id}: {resposta.status_code}")
+    if resposta.status_code != 200:
+        return None
+
+    try:
+        up = resposta.json()
+    except ValueError:
+        return None
+
+    seller_id = up.get("user_id") or up.get("seller_id")
+    if not seller_id:
+        print(f"USER_PRODUCT {user_product_id} sem user_id")
+        return None
+
+    try:
+        busca = requests.get(
+            f"https://api.mercadolibre.com/users/{seller_id}/items/search",
+            headers=headers,
+            params={"user_product_id": user_product_id, "limit": 50},
+            timeout=20,
+        )
+    except requests.RequestException as erro:
+        print(f"ERRO itens do USER_PRODUCT {user_product_id}: {erro}")
+        return None
+
+    print(f"ITENS USER_PRODUCT {user_product_id}: {busca.status_code}")
+    if busca.status_code != 200:
+        return None
+
+    try:
+        item_ids = busca.json().get("results") or []
+    except ValueError:
+        return None
+
+    for item_id in item_ids:
+        oferta = consultar_item(item_id, headers)
+        if oferta:
+            oferta["user_product_id"] = str(user_product_id)
+            return oferta
+
+    return None
+
+
+def encontrar_mais_vendido(headers):
+    """Testa ITEM, PRODUCT e USER_PRODUCT dos rankings oficiais."""
+    for termo in TERMOS_CATEGORIAS:
+        category_id = descobrir_categoria(termo, headers)
+        if not category_id:
+            print(f"SEM CATEGORIA: {termo}")
             continue
 
-        try:
-            dados = resposta.json()
-        except ValueError:
-            continue
+        ranking = consultar_ranking(category_id, headers)
+        print(f"RANKING {termo} {category_id}: {len(ranking)} resultados")
 
-        resultados = dados.get("results") or []
-
-        # Primeiro procura uma oferta com desconto real.
-        for resultado in resultados:
-            item_id = resultado.get("id")
-            if not item_id:
+        for posicao, entrada in enumerate(ranking[:20], start=1):
+            tipo = str(entrada.get("type") or "").upper()
+            identificador = entrada.get("id")
+            if not identificador:
                 continue
 
-            oferta = consultar_item_publico(item_id)
+            oferta = None
+            if tipo == "ITEM":
+                oferta = consultar_item(identificador, headers)
+            elif tipo == "PRODUCT":
+                oferta = converter_product(identificador, headers)
+            elif tipo == "USER_PRODUCT":
+                oferta = converter_user_product(identificador, headers)
+
             if not oferta:
                 continue
 
-            desconto = calcular_desconto(
+            oferta["posicao"] = posicao
+            oferta["categoria_busca"] = termo
+            oferta["tipo_ranking"] = tipo
+            oferta["desconto"] = calcular_desconto(
                 oferta.get("preco_numero"),
                 oferta.get("preco_original"),
             )
-
-            if desconto and desconto >= 5:
-                oferta["desconto"] = desconto
-                oferta["categoria_busca"] = termo
-                return oferta
-
-        # Se nao houver desconto, usa o primeiro item valido.
-        for resultado in resultados:
-            item_id = resultado.get("id")
-            if not item_id:
-                continue
-
-            oferta = consultar_item_publico(item_id)
-            if oferta:
-                oferta["desconto"] = calcular_desconto(
-                    oferta.get("preco_numero"),
-                    oferta.get("preco_original"),
-                )
-                oferta["categoria_busca"] = termo
-                return oferta
+            return oferta
 
     return None
 
@@ -545,7 +545,7 @@ def buscar_mais_vendidos():
         "Authorization": f"Bearer {ML_ACCESS_TOKEN}"
     }
 
-    oferta = buscar_oferta_publica()
+    oferta = encontrar_mais_vendido(headers)
 
     if not oferta:
         return """
