@@ -14,17 +14,9 @@ REDIRECT_URI = "https://ofertas-mercado-livre-bot.onrender.com/oauth/callback"
 ML_ACCESS_TOKEN = None
 
 
-def enviar_telegram(texto):
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-
-    return requests.post(
-        url,
-        json={
-            "chat_id": TELEGRAM_CHAT_ID,
-            "text": texto
-        },
-        timeout=15
-    )
+def telegram_api(metodo, payload):
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/{metodo}"
+    return requests.post(url, json=payload, timeout=15)
 
 
 @app.route("/")
@@ -40,7 +32,7 @@ def home():
 
     <p>
         <a href="/buscar-produto?q=smartphone">
-            2 - Buscar smartphone
+            2 - Buscar produto
         </a>
     </p>
     """
@@ -97,7 +89,7 @@ def oauth_callback():
 
     return """
     <h2>Mercado Livre conectado! ✅</h2>
-    <p>Agora clique em Buscar produto.</p>
+
     <p>
         <a href="/buscar-produto?q=smartphone">
             Buscar produto
@@ -121,7 +113,7 @@ def buscar_produto():
     }
 
     try:
-        response = requests.get(
+        busca = requests.get(
             "https://api.mercadolibre.com/products/search",
             headers=headers,
             params={
@@ -134,41 +126,120 @@ def buscar_produto():
         )
 
     except requests.RequestException:
-        return "Erro de conexao com Mercado Livre."
+        return "Erro ao buscar produtos."
 
-    if response.status_code != 200:
+    if busca.status_code != 200:
         return (
-            "Erro na busca de produtos. "
-            f"Codigo: {response.status_code}"
+            "Erro na busca. "
+            f"Codigo: {busca.status_code}"
         )
 
-    dados = response.json()
-    produtos = dados.get("results", [])
+    produtos = busca.json().get("results", [])
 
     if not produtos:
-        return "A busca funcionou, mas nenhum produto foi encontrado."
+        return "Nenhum produto encontrado."
 
     produto = produtos[0]
 
-    product_id = produto.get("id", "Sem ID")
-    nome = produto.get("name", "Produto sem nome")
+    product_id = produto.get("id")
+    nome = produto.get("name", "Produto")
 
-    mensagem = (
-        "🔥 PRODUTO ENCONTRADO!\n\n"
+    # Busca detalhes do produto
+    try:
+        detalhes = requests.get(
+            f"https://api.mercadolibre.com/products/{product_id}",
+            headers=headers,
+            timeout=15
+        )
+
+    except requests.RequestException:
+        return "Erro ao buscar detalhes do produto."
+
+    if detalhes.status_code != 200:
+        return (
+            "Produto encontrado, mas nao consegui "
+            "buscar os detalhes. "
+            f"Codigo: {detalhes.status_code}"
+        )
+
+    dados = detalhes.json()
+
+    # Tenta pegar imagem
+    imagem = None
+
+    pictures = dados.get("pictures", [])
+
+    if pictures:
+        imagem = (
+            pictures[0].get("secure_url")
+            or pictures[0].get("url")
+        )
+
+    # Tenta pegar a oferta principal
+    oferta = dados.get("buy_box_winner") or {}
+
+    preco = oferta.get("price")
+    item_id = oferta.get("item_id")
+
+    if preco is None:
+        preco_texto = "Consulte o preco no Mercado Livre"
+    else:
+        preco_texto = f"R$ {preco:,.2f}"
+        preco_texto = (
+            preco_texto
+            .replace(",", "X")
+            .replace(".", ",")
+            .replace("X", ".")
+        )
+
+    # Link normal do anuncio
+    link = ""
+
+    if item_id:
+        link = f"https://produto.mercadolivre.com.br/MLB-{item_id.replace('MLB', '')}"
+
+    legenda = (
+        "🔥 OFERTA ENCONTRADA!\n\n"
         f"📦 {nome}\n\n"
-        f"🆔 {product_id}\n\n"
-        f"🔎 Pesquisa: {termo}\n\n"
-        "✅ Busca no Mercado Livre funcionando!"
+        f"💰 {preco_texto}\n\n"
     )
 
-    telegram = enviar_telegram(mensagem)
+    if link:
+        legenda += (
+            f"🔗 Link normal:\n{link}\n\n"
+            "💰 Gere seu link de afiliado antes de publicar.\n\n"
+        )
+
+    legenda += "🧪 Oferta encontrada automaticamente pelo bot."
+
+    # Se tiver imagem, manda foto + legenda
+    if imagem:
+        telegram = telegram_api(
+            "sendPhoto",
+            {
+                "chat_id": TELEGRAM_CHAT_ID,
+                "photo": imagem,
+                "caption": legenda
+            }
+        )
+
+    else:
+        telegram = telegram_api(
+            "sendMessage",
+            {
+                "chat_id": TELEGRAM_CHAT_ID,
+                "text": legenda
+            }
+        )
 
     if telegram.status_code != 200:
-        return "Produto encontrado, mas houve erro no Telegram."
+        return (
+            "Produto encontrado, mas houve erro "
+            "ao enviar para o Telegram."
+        )
 
     return """
-    <h2>DEU CERTO! 🚀</h2>
-    <p>Produto encontrado no Mercado Livre.</p>
+    <h2>OFERTA ENVIADA! 🚀</h2>
     <p>Confira seu Telegram.</p>
     """
 
