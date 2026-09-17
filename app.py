@@ -4,8 +4,8 @@ import requests
 
 app = Flask(__name__)
 
-CLIENT_ID = os.environ.get("ML_CLIENT_ID")
-CLIENT_SECRET = os.environ.get("ML_CLIENT_SECRET")
+CLIENT_ID = os.environ.get("ML_CLIENT_ID", "").strip()
+CLIENT_SECRET = os.environ.get("ML_CLIENT_SECRET", "").strip()
 
 print("ML_CLIENT_ID carregado:", bool(CLIENT_ID))
 print("ML_CLIENT_SECRET carregado:", bool(CLIENT_SECRET))
