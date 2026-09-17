@@ -10,6 +10,7 @@ CLIENT_ID = os.environ.get("ML_CLIENT_ID", "").strip()
 CLIENT_SECRET = os.environ.get("ML_CLIENT_SECRET", "").strip()
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+TELEGRAM_CHANNEL_ID = os.environ.get("TELEGRAM_CHANNEL_ID", "@TNBofertasMercadoLivreBR").strip()
 
 BASE_URL = "https://ofertas-mercado-livre-bot.onrender.com"
 REDIRECT_URI = f"{BASE_URL}/oauth/callback"
@@ -1097,22 +1098,81 @@ def telegram_webhook():
             None
         )
 
-        telegram_api(
-            "sendMessage",
-            {
-                "chat_id":
-                    TELEGRAM_CHAT_ID,
-                "text": (
-                    "✅ LINK RECEBIDO!\n\n"
-                    f"📦 {oferta['nome']}\n\n"
-                    f"💰 {oferta['preco']}\n\n"
-                    "🔗 Link associado "
-                    "a oferta.\n\n"
-                    "🔒 Ainda NAO publiquei "
-                    "no canal."
-                )
-            }
+        # Monta a publicação final usando EXATAMENTE o link afiliado recebido.
+        nome = oferta.get("nome") or "Oferta Mercado Livre"
+        imagem = oferta.get("imagem")
+        preco_numero = oferta.get("preco_numero")
+        preco = oferta.get("preco")
+        desconto = oferta.get("desconto")
+        preco_original = oferta.get("preco_original")
+
+        legenda_canal = (
+            "🔥 OFERTA NO MERCADO LIVRE!\n\n"
+            f"📦 {nome}\n\n"
         )
+
+        if desconto and preco_numero is not None:
+            legenda_canal += (
+                f"🏷️ {desconto}% OFF\n"
+                f"❌ De: {formatar_preco(preco_original)}\n"
+                f"✅ Por: {preco}\n\n"
+            )
+        elif preco_numero is not None:
+            legenda_canal += f"💰 {preco}\n\n"
+        else:
+            legenda_canal += "💰 Confira o preço atual no link 👇\n\n"
+
+        legenda_canal += (
+            "🛒 COMPRAR AGORA:\n"
+            f"{texto}\n\n"
+            "⚠️ Preço e disponibilidade podem mudar."
+        )
+
+        payload_canal = {
+            "chat_id": TELEGRAM_CHANNEL_ID
+        }
+
+        try:
+            if imagem:
+                payload_canal["photo"] = imagem
+                payload_canal["caption"] = legenda_canal
+                publicacao = telegram_api("sendPhoto", payload_canal)
+            else:
+                payload_canal["text"] = legenda_canal
+                publicacao = telegram_api("sendMessage", payload_canal)
+
+            publicado = publicacao.status_code == 200
+
+        except requests.RequestException as erro:
+            print(f"ERRO PUBLICAR CANAL: {erro}")
+            publicado = False
+
+        if publicado:
+            telegram_api(
+                "sendMessage",
+                {
+                    "chat_id": TELEGRAM_CHAT_ID,
+                    "text": (
+                        "🚀 PUBLICADO NO CANAL!\n\n"
+                        f"📦 {nome}\n\n"
+                        "✅ Seu link de afiliado foi usado na publicação."
+                    )
+                }
+            )
+            OFERTAS.pop(item_id, None)
+        else:
+            telegram_api(
+                "sendMessage",
+                {
+                    "chat_id": TELEGRAM_CHAT_ID,
+                    "text": (
+                        "⚠️ Recebi seu link de afiliado, mas o Telegram "
+                        "não conseguiu publicar no canal.\n\n"
+                        "Confira se o bot continua como administrador do canal "
+                        "e se pode publicar mensagens."
+                    )
+                }
+            )
 
         return "OK", 200
 
