@@ -1,6 +1,7 @@
 from flask import Flask, request, redirect
 import os
 import requests
+import time
 
 app = Flask(__name__)
 
@@ -201,7 +202,7 @@ def descobrir_categoria(termo, headers):
                 "q": termo,
                 "limit": 1
             },
-            timeout=20
+            timeout=4
         )
 
     except requests.RequestException:
@@ -226,7 +227,7 @@ def consultar_ranking(category_id, headers):
                 f"highlights/MLB/category/{category_id}"
             ),
             headers=headers,
-            timeout=20
+            timeout=4
         )
 
     except requests.RequestException:
@@ -245,7 +246,7 @@ def consultar_item(item_id, headers):
         resposta = requests.get(
             f"https://api.mercadolibre.com/items/{item_id}",
             headers=headers,
-            timeout=20
+            timeout=4
         )
 
     except requests.RequestException:
@@ -303,7 +304,7 @@ def converter_product(product_id, headers):
                 f"products/{product_id}"
             ),
             headers=headers,
-            timeout=20
+            timeout=4
         )
 
     except requests.RequestException:
@@ -374,7 +375,7 @@ def consultar_item_publico(item_id):
     try:
         resposta = requests.get(
             f"https://api.mercadolibre.com/items/{item_id}",
-            timeout=20,
+            timeout=4,
         )
     except requests.RequestException as erro:
         print(f"ERRO item {item_id}: {erro}")
@@ -432,7 +433,7 @@ def converter_user_product(user_product_id, headers):
         resposta = requests.get(
             f"https://api.mercadolibre.com/user-products/{user_product_id}",
             headers=headers,
-            timeout=20,
+            timeout=4,
         )
     except requests.RequestException as erro:
         print(f"ERRO USER_PRODUCT {user_product_id}: {erro}")
@@ -457,7 +458,7 @@ def converter_user_product(user_product_id, headers):
             f"https://api.mercadolibre.com/users/{seller_id}/items/search",
             headers=headers,
             params={"user_product_id": user_product_id, "limit": 50},
-            timeout=20,
+            timeout=4,
         )
     except requests.RequestException as erro:
         print(f"ERRO itens do USER_PRODUCT {user_product_id}: {erro}")
@@ -482,8 +483,19 @@ def converter_user_product(user_product_id, headers):
 
 
 def encontrar_mais_vendido(headers):
-    """Testa ITEM, PRODUCT e USER_PRODUCT dos rankings oficiais."""
-    for termo in TERMOS_CATEGORIAS:
+    """Busca rapida para nao estourar o timeout do Gunicorn/Render."""
+    inicio = time.monotonic()
+    limite_segundos = 18
+    candidatos_testados = 0
+    max_candidatos = 6
+
+    # Poucas categorias por requisicao. Outras podem ser testadas
+    # em uma nova chamada, sem prender o worker por muito tempo.
+    for termo in TERMOS_CATEGORIAS[:4]:
+        if time.monotonic() - inicio >= limite_segundos:
+            print("BUSCA ENCERRADA PELO LIMITE DE TEMPO")
+            break
+
         category_id = descobrir_categoria(termo, headers)
         if not category_id:
             print(f"SEM CATEGORIA: {termo}")
@@ -492,11 +504,21 @@ def encontrar_mais_vendido(headers):
         ranking = consultar_ranking(category_id, headers)
         print(f"RANKING {termo} {category_id}: {len(ranking)} resultados")
 
-        for posicao, entrada in enumerate(ranking[:20], start=1):
+        for posicao, entrada in enumerate(ranking[:8], start=1):
+            if time.monotonic() - inicio >= limite_segundos:
+                print("BUSCA ENCERRADA PELO LIMITE DE TEMPO")
+                return None
+            if candidatos_testados >= max_candidatos:
+                print("BUSCA ENCERRADA PELO LIMITE DE CANDIDATOS")
+                return None
+
             tipo = str(entrada.get("type") or "").upper()
             identificador = entrada.get("id")
             if not identificador:
                 continue
+
+            candidatos_testados += 1
+            print(f"TESTE #{candidatos_testados}: {tipo} {identificador}")
 
             oferta = None
             if tipo == "ITEM":
@@ -555,8 +577,8 @@ def buscar_mais_vendidos():
         </h3>
 
         <p>
-            ITEM e PRODUCT foram testados.
-            USER_PRODUCT ainda nao esta habilitado.
+            ITEM, PRODUCT e USER_PRODUCT foram testados
+            dentro do limite rapido desta busca.
         </p>
         """
 
