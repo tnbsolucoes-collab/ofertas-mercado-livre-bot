@@ -23,16 +23,49 @@ OFERTAS = {}
 AGUARDANDO_LINK = {}
 
 TERMOS_CATEGORIAS = [
+    # Eletronicos / tecnologia
     "smartphone",
-    "fone bluetooth",
     "smart tv",
     "notebook",
-    "tenis",
-    "perfume",
+    "fone bluetooth",
+    "caixa de som bluetooth",
+    "smartwatch",
+    "tablet",
+    "monitor gamer",
+    "teclado gamer",
+    "mouse gamer",
+    "video game",
+
+    # Casa / eletrodomesticos
     "air fryer",
-    "relogio",
-    "caixa de som",
-    "aspirador"
+    "aspirador de po",
+    "cafeteira",
+    "liquidificador",
+    "microondas",
+    "ventilador",
+    "maquina de lavar",
+    "geladeira",
+
+    # Moveis / casa
+    "sofa",
+    "guarda roupa",
+    "mesa de jantar",
+    "cadeira escritorio",
+    "colchao",
+    "rack para tv",
+
+    # Moda
+    "tenis",
+    "roupa feminina",
+    "roupa masculina",
+    "jaqueta",
+    "bolsa feminina",
+
+    # Beleza / ferramentas
+    "perfume",
+    "secador de cabelo",
+    "parafusadeira",
+    "furadeira",
 ]
 
 
@@ -617,7 +650,17 @@ def encontrar_mais_vendido(headers):
     inicio = time.monotonic()
     limite_segundos = 12
 
-    for termo in TERMOS_CATEGORIAS[:3]:
+    # Rotaciona as categorias para nao mandar sempre smartphone.
+    quantidade = 3
+    inicio_rotacao = int(time.time() // 300) % len(TERMOS_CATEGORIAS)
+    termos_busca = [
+        TERMOS_CATEGORIAS[(inicio_rotacao + i) % len(TERMOS_CATEGORIAS)]
+        for i in range(quantidade)
+    ]
+
+    print(f"CATEGORIAS DESTA BUSCA: {termos_busca}")
+
+    for termo in termos_busca:
         if time.monotonic() - inicio >= limite_segundos:
             return None
 
