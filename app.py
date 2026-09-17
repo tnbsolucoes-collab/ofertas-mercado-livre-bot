@@ -6,15 +6,13 @@ app = Flask(__name__)
 
 CLIENT_ID = os.environ.get("ML_CLIENT_ID", "").strip()
 CLIENT_SECRET = os.environ.get("ML_CLIENT_SECRET", "").strip()
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
 
 BASE_URL = "https://ofertas-mercado-livre-bot.onrender.com"
 REDIRECT_URI = f"{BASE_URL}/oauth/callback"
 
 ML_ACCESS_TOKEN = None
-
 REQUEST_TIMEOUT = 4
+
 TERMO_ATUAL = "smartphone"
 
 
@@ -30,8 +28,8 @@ def home():
     </p>
 
     <p>
-        <a href="/diagnostico-ranking">
-            2 - Diagnosticar ranking 🔎
+        <a href="/teste-produtos">
+            2 - Testar links dos produtos 🔎
         </a>
     </p>
     """
@@ -83,7 +81,7 @@ def oauth_callback():
     try:
         dados = resposta.json()
     except ValueError:
-        return "Resposta invalida do Mercado Livre."
+        return "Resposta invalida."
 
     ML_ACCESS_TOKEN = dados.get("access_token")
 
@@ -94,8 +92,8 @@ def oauth_callback():
     <h2>Mercado Livre conectado! ✅</h2>
 
     <p>
-        <a href="/diagnostico-ranking">
-            Executar diagnostico 🔎
+        <a href="/teste-produtos">
+            Testar produtos 🔎
         </a>
     </p>
     """
@@ -133,7 +131,7 @@ def descobrir_categoria(headers):
     return dados[0].get("category_id")
 
 
-def consultar_ranking(category_id, headers):
+def pegar_ranking(category_id, headers):
     try:
         resposta = requests.get(
             (
@@ -165,18 +163,7 @@ def consultar_ranking(category_id, headers):
     return ranking[:5]
 
 
-def diagnosticar_product(product_id, headers):
-    resultado = {
-        "id": str(product_id),
-        "http": None,
-        "status": "-",
-        "tem_buy_box": False,
-        "item_id": "-",
-        "catalog_product_id": "-",
-        "domain_id": "-",
-        "children": "-"
-    }
-
+def pegar_produto(product_id, headers):
     try:
         resposta = requests.get(
             (
@@ -188,64 +175,56 @@ def diagnosticar_product(product_id, headers):
         )
 
     except requests.RequestException:
-        resultado["http"] = "ERRO_CONEXAO"
-        return resultado
-
-    resultado["http"] = resposta.status_code
+        return None
 
     if resposta.status_code != 200:
-        return resultado
+        return None
 
     try:
         produto = resposta.json()
     except ValueError:
-        resultado["status"] = "JSON_INVALIDO"
-        return resultado
+        return None
 
-    resultado["status"] = produto.get(
-        "status",
-        "-"
-    )
+    pictures = produto.get("pictures") or []
 
-    resultado["catalog_product_id"] = produto.get(
-        "catalog_product_id",
-        "-"
-    )
+    imagem = ""
 
-    resultado["domain_id"] = produto.get(
-        "domain_id",
-        "-"
-    )
+    if pictures:
+        primeira = pictures[0]
 
-    buy_box = produto.get("buy_box_winner")
+        if isinstance(primeira, dict):
+            imagem = (
+                primeira.get("url")
+                or primeira.get("secure_url")
+                or ""
+            )
 
-    if isinstance(buy_box, dict) and buy_box:
-        resultado["tem_buy_box"] = True
+    settings = produto.get("settings") or {}
 
-        resultado["item_id"] = buy_box.get(
-            "item_id",
-            "-"
+    return {
+        "id": produto.get("id", product_id),
+        "status": produto.get("status", "-"),
+        "nome": (
+            produto.get("name")
+            or produto.get("family_name")
+            or "-"
+        ),
+        "permalink": produto.get("permalink") or "",
+        "domain_id": produto.get("domain_id") or "-",
+        "parent_id": produto.get("parent_id") or "-",
+        "listing_strategy": (
+            settings.get("listing_strategy")
+            or "-"
+        ),
+        "imagem": imagem,
+        "tem_buy_box": bool(
+            produto.get("buy_box_winner")
         )
-
-    children = (
-        produto.get("children_ids")
-        or produto.get("children")
-        or produto.get("variations")
-        or []
-    )
-
-    if isinstance(children, list):
-        resultado["children"] = len(children)
-    elif children:
-        resultado["children"] = "SIM"
-    else:
-        resultado["children"] = 0
-
-    return resultado
+    }
 
 
-@app.route("/diagnostico-ranking")
-def diagnostico_ranking():
+@app.route("/teste-produtos")
+def teste_produtos():
     if not ML_ACCESS_TOKEN:
         return """
         <h3>Conecte o Mercado Livre primeiro.</h3>
@@ -264,84 +243,21 @@ def diagnostico_ranking():
     category_id = descobrir_categoria(headers)
 
     if not category_id:
-        return """
-        <h3>
-            Nao consegui descobrir a categoria.
-        </h3>
-        """
+        return "Nao consegui descobrir a categoria."
 
-    ranking = consultar_ranking(
+    ranking = pegar_ranking(
         category_id,
         headers
     )
 
     if not ranking:
-        return """
-        <h3>
-            Ranking nao retornou resultados.
-        </h3>
-        """
-
-    linhas = []
-
-    for resultado_ranking in ranking:
-        tipo = str(
-            resultado_ranking.get("type", "")
-        ).upper()
-
-        resultado_id = resultado_ranking.get("id")
-        posicao = resultado_ranking.get(
-            "position",
-            "?"
-        )
-
-        if tipo != "PRODUCT":
-            linhas.append(
-                {
-                    "posicao": posicao,
-                    "tipo": tipo,
-                    "id": resultado_id,
-                    "http": "-",
-                    "status": "-",
-                    "buy_box": "-",
-                    "item_id": "-",
-                    "catalog": "-",
-                    "children": "-"
-                }
-            )
-
-            continue
-
-        diagnostico = diagnosticar_product(
-            resultado_id,
-            headers
-        )
-
-        linhas.append(
-            {
-                "posicao": posicao,
-                "tipo": tipo,
-                "id": diagnostico["id"],
-                "http": diagnostico["http"],
-                "status": diagnostico["status"],
-                "buy_box": (
-                    "SIM"
-                    if diagnostico["tem_buy_box"]
-                    else "NAO"
-                ),
-                "item_id": diagnostico["item_id"],
-                "catalog": diagnostico[
-                    "catalog_product_id"
-                ],
-                "children": diagnostico["children"]
-            }
-        )
+        return "Ranking vazio."
 
     html = f"""
-    <h2>DIAGNOSTICO DO RANKING 🔎</h2>
+    <h2>TESTE DOS PRODUTOS 🔎</h2>
 
     <p>
-        Categoria descoberta:
+        Categoria:
         <b>{category_id}</b>
     </p>
 
@@ -353,59 +269,106 @@ def diagnostico_ranking():
     <hr>
     """
 
-    for linha in linhas:
+    encontrados = 0
+
+    for resultado in ranking:
+        tipo = str(
+            resultado.get("type", "")
+        ).upper()
+
+        product_id = resultado.get("id")
+        posicao = resultado.get(
+            "position",
+            "?"
+        )
+
+        if tipo != "PRODUCT":
+            continue
+
+        produto = pegar_produto(
+            product_id,
+            headers
+        )
+
+        if not produto:
+            continue
+
+        encontrados += 1
+
+        link = produto["permalink"]
+
+        if link:
+            link_html = (
+                f'<a href="{link}" '
+                f'target="_blank">'
+                f'ABRIR PRODUTO 🔗'
+                f'</a>'
+            )
+
+            resultado_link = "TEM LINK ✅"
+
+        else:
+            link_html = "SEM LINK"
+            resultado_link = "SEM LINK ❌"
+
         html += f"""
         <h3>
-            Ranking #{linha["posicao"]}
+            Ranking #{posicao}
         </h3>
 
         <p>
-            Tipo:
-            <b>{linha["tipo"]}</b>
+            <b>{produto["nome"]}</b>
         </p>
 
         <p>
-            ID:
-            <b>{linha["id"]}</b>
-        </p>
-
-        <p>
-            HTTP /products:
-            <b>{linha["http"]}</b>
+            Product ID:
+            <b>{produto["id"]}</b>
         </p>
 
         <p>
             Status:
-            <b>{linha["status"]}</b>
+            <b>{produto["status"]}</b>
         </p>
 
         <p>
-            Tem buy_box_winner:
-            <b>{linha["buy_box"]}</b>
+            Link:
+            <b>{resultado_link}</b>
         </p>
 
         <p>
-            item_id:
-            <b>{linha["item_id"]}</b>
+            Listing strategy:
+            <b>{produto["listing_strategy"]}</b>
         </p>
 
         <p>
-            catalog_product_id:
-            <b>{linha["catalog"]}</b>
+            Parent:
+            <b>{produto["parent_id"]}</b>
         </p>
 
         <p>
-            Filhos/variacoes detectados:
-            <b>{linha["children"]}</b>
+            Buy box:
+            <b>
+                {"SIM" if produto["tem_buy_box"] else "NAO"}
+            </b>
+        </p>
+
+        <p>
+            {link_html}
         </p>
 
         <hr>
         """
 
+    if encontrados == 0:
+        html += """
+        <h3>
+            Nenhum PRODUCT conseguiu ser consultado.
+        </h3>
+        """
+
     html += """
     <p>
-        Nenhum token ou segredo foi exibido
-        neste diagnostico.
+        🔒 Nenhum token ou segredo foi exibido.
     </p>
     """
 
