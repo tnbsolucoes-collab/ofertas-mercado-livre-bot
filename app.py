@@ -16,7 +16,12 @@ ML_ACCESS_TOKEN = None
 
 def telegram_api(metodo, payload):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/{metodo}"
-    return requests.post(url, json=payload, timeout=15)
+
+    return requests.post(
+        url,
+        json=payload,
+        timeout=15
+    )
 
 
 @app.route("/")
@@ -129,10 +134,7 @@ def buscar_produto():
         return "Erro ao buscar produtos."
 
     if busca.status_code != 200:
-        return (
-            "Erro na busca. "
-            f"Codigo: {busca.status_code}"
-        )
+        return f"Erro na busca. Codigo: {busca.status_code}"
 
     produtos = busca.json().get("results", [])
 
@@ -144,7 +146,6 @@ def buscar_produto():
     product_id = produto.get("id")
     nome = produto.get("name", "Produto")
 
-    # Busca detalhes do produto
     try:
         detalhes = requests.get(
             f"https://api.mercadolibre.com/products/{product_id}",
@@ -158,15 +159,12 @@ def buscar_produto():
     if detalhes.status_code != 200:
         return (
             "Produto encontrado, mas nao consegui "
-            "buscar os detalhes. "
-            f"Codigo: {detalhes.status_code}"
+            f"buscar os detalhes. Codigo: {detalhes.status_code}"
         )
 
     dados = detalhes.json()
 
-    # Tenta pegar imagem
     imagem = None
-
     pictures = dados.get("pictures", [])
 
     if pictures:
@@ -175,7 +173,6 @@ def buscar_produto():
             or pictures[0].get("url")
         )
 
-    # Tenta pegar a oferta principal
     oferta = dados.get("buy_box_winner") or {}
 
     preco = oferta.get("price")
@@ -192,11 +189,15 @@ def buscar_produto():
             .replace("X", ".")
         )
 
-    # Link normal do anuncio
     link = ""
 
     if item_id:
-        link = f"https://produto.mercadolivre.com.br/MLB-{item_id.replace('MLB', '')}"
+        numero_item = str(item_id).replace("MLB", "")
+
+        link = (
+            "https://produto.mercadolivre.com.br/"
+            f"MLB-{numero_item}"
+        )
 
     legenda = (
         "🔥 OFERTA ENCONTRADA!\n\n"
@@ -207,40 +208,53 @@ def buscar_produto():
     if link:
         legenda += (
             f"🔗 Link normal:\n{link}\n\n"
-            "💰 Gere seu link de afiliado antes de publicar.\n\n"
+            "💰 Gere o link de afiliado antes de publicar."
         )
 
-    legenda += "🧪 Oferta encontrada automaticamente pelo bot."
+    botoes = {
+        "inline_keyboard": [
+            [
+                {
+                    "text": "✅ PUBLICAR",
+                    "callback_data": f"publicar:{product_id}"
+                },
+                {
+                    "text": "❌ IGNORAR",
+                    "callback_data": f"ignorar:{product_id}"
+                }
+            ]
+        ]
+    }
 
-    # Se tiver imagem, manda foto + legenda
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "reply_markup": botoes
+    }
+
     if imagem:
+        payload["photo"] = imagem
+        payload["caption"] = legenda
+
         telegram = telegram_api(
             "sendPhoto",
-            {
-                "chat_id": TELEGRAM_CHAT_ID,
-                "photo": imagem,
-                "caption": legenda
-            }
+            payload
         )
 
     else:
+        payload["text"] = legenda
+
         telegram = telegram_api(
             "sendMessage",
-            {
-                "chat_id": TELEGRAM_CHAT_ID,
-                "text": legenda
-            }
+            payload
         )
 
     if telegram.status_code != 200:
-        return (
-            "Produto encontrado, mas houve erro "
-            "ao enviar para o Telegram."
-        )
+        return "Produto encontrado, mas houve erro no Telegram."
 
     return """
     <h2>OFERTA ENVIADA! 🚀</h2>
     <p>Confira seu Telegram.</p>
+    <p>Agora a oferta possui os botoes de aprovacao.</p>
     """
 
 
