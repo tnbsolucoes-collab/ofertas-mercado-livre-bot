@@ -1,37 +1,19 @@
 from flask import Flask, request, redirect
 import os
 import requests
+import html
+import json
 
 app = Flask(__name__)
 
 CLIENT_ID = os.environ.get("ML_CLIENT_ID", "").strip()
 CLIENT_SECRET = os.environ.get("ML_CLIENT_SECRET", "").strip()
 
-TELEGRAM_BOT_TOKEN = os.environ.get(
-    "TELEGRAM_BOT_TOKEN", ""
-).strip()
-
-TELEGRAM_CHAT_ID = os.environ.get(
-    "TELEGRAM_CHAT_ID", ""
-).strip()
-
 BASE_URL = "https://ofertas-mercado-livre-bot.onrender.com"
 REDIRECT_URI = f"{BASE_URL}/oauth/callback"
 
 ML_ACCESS_TOKEN = None
-
 TIMEOUT = 5
-
-TERMOS = [
-    "iphone",
-    "samsung galaxy",
-    "motorola",
-    "fone bluetooth",
-    "air fryer",
-    "smart tv",
-    "notebook",
-    "perfume"
-]
 
 
 def ml_headers():
@@ -40,60 +22,24 @@ def ml_headers():
     }
 
 
-def formatar_preco(valor):
+def seguro(valor):
     if valor is None:
         return "-"
 
-    try:
-        valor = float(valor)
-    except (TypeError, ValueError):
-        return str(valor)
+    if isinstance(valor, (dict, list)):
+        valor = json.dumps(
+            valor,
+            ensure_ascii=False,
+            indent=2
+        )
 
-    texto = f"R$ {valor:,.2f}"
-
-    return (
-        texto
-        .replace(",", "X")
-        .replace(".", ",")
-        .replace("X", ".")
-    )
-
-
-def calcular_desconto(preco, original):
-    try:
-        preco = float(preco)
-        original = float(original)
-
-        if original <= preco or original <= 0:
-            return None
-
-        desconto = (
-            (original - preco) / original
-        ) * 100
-
-        return round(desconto)
-
-    except (TypeError, ValueError):
-        return None
-
-
-def telegram_api(metodo, payload):
-    url = (
-        "https://api.telegram.org/"
-        f"bot{TELEGRAM_BOT_TOKEN}/{metodo}"
-    )
-
-    return requests.post(
-        url,
-        json=payload,
-        timeout=TIMEOUT
-    )
+    return html.escape(str(valor))
 
 
 @app.route("/")
 def home():
     return """
-    <h2>Bot Ofertas Mercado Livre BR 🤖</h2>
+    <h2>Bot Mercado Livre 🤖</h2>
 
     <p>
         <a href="/login">
@@ -102,8 +48,8 @@ def home():
     </p>
 
     <p>
-        <a href="/buscar-buybox">
-            2 - Procurar oferta real 🔥
+        <a href="/diagnostico-produto">
+            2 - Diagnosticar produto 🔎
         </a>
     </p>
     """
@@ -144,11 +90,11 @@ def oauth_callback():
         )
 
     except requests.RequestException:
-        return "Erro ao conectar ao Mercado Livre."
+        return "Erro de conexao."
 
     if resposta.status_code != 200:
         return (
-            "Erro OAuth. HTTP "
+            "Erro OAuth HTTP "
             f"{resposta.status_code}"
         )
 
@@ -166,26 +112,23 @@ def oauth_callback():
     <h2>Mercado Livre conectado! ✅</h2>
 
     <p>
-        <a href="/buscar-buybox">
-            Procurar oferta real 🔥
+        <a href="/diagnostico-produto">
+            Diagnosticar produto 🔎
         </a>
     </p>
     """
 
 
-def buscar_produtos(termo):
+def pesquisar():
     try:
         resposta = requests.get(
-            (
-                "https://api.mercadolibre.com/"
-                "products/search"
-            ),
+            "https://api.mercadolibre.com/products/search",
             headers=ml_headers(),
             params={
                 "status": "active",
                 "site_id": "MLB",
-                "q": termo,
-                "limit": 10
+                "q": "iphone",
+                "limit": 5
             },
             timeout=TIMEOUT
         )
@@ -204,7 +147,7 @@ def buscar_produtos(termo):
     return dados.get("results") or [], "200"
 
 
-def consultar_produto(product_id):
+def detalhe(product_id):
     try:
         resposta = requests.get(
             (
@@ -216,288 +159,140 @@ def consultar_produto(product_id):
         )
 
     except requests.RequestException:
-        return None
+        return None, "ERRO_CONEXAO"
 
     if resposta.status_code != 200:
-        return None
+        return None, str(resposta.status_code)
 
     try:
-        return resposta.json()
+        return resposta.json(), "200"
     except ValueError:
-        return None
+        return None, "JSON_INVALIDO"
 
 
-def imagem_produto(produto):
-    pictures = produto.get("pictures") or []
-
-    if pictures:
-        primeira = pictures[0]
-
-        if isinstance(primeira, dict):
-            return (
-                primeira.get("secure_url")
-                or primeira.get("url")
-                or ""
-            )
-
-    return ""
-
-
-def extrair_oferta(produto, termo):
-    buybox = produto.get("buy_box_winner")
-
-    if not isinstance(buybox, dict):
-        return None
-
-    item_id = buybox.get("item_id")
-    preco = buybox.get("price")
-
-    if not item_id or preco is None:
-        return None
-
-    original = buybox.get("original_price")
-
-    desconto = calcular_desconto(
-        preco,
-        original
-    )
-
-    nome = (
-        produto.get("name")
-        or produto.get("family_name")
-        or "Produto Mercado Livre"
-    )
-
-    # Preferimos o permalink oficial
-    # da pagina de produto retornado pela API.
-    link = produto.get("permalink")
-
-    if not link:
-        return None
-
-    return {
-        "item_id": item_id,
-        "product_id": produto.get("id"),
-        "titulo": nome,
-        "preco": preco,
-        "original": original,
-        "desconto": desconto,
-        "link": link,
-        "imagem": imagem_produto(produto),
-        "termo": termo,
-        "frete_gratis": (
-            buybox.get("shipping", {})
-            .get("free_shipping", False)
-        )
-    }
-
-
-def encontrar_oferta():
-    diagnostico = []
-
-    for termo in TERMOS:
-
-        produtos, status = buscar_produtos(termo)
-
-        diagnostico.append(
-            f"{termo}: HTTP {status} / "
-            f"{len(produtos)} produtos"
-        )
-
-        if status != "200":
-            continue
-
-        # Evita dezenas de requisicoes.
-        # Primeiro usamos os dados retornados
-        # pelo proprio products/search.
-        for resumo in produtos:
-
-            buybox = resumo.get(
-                "buy_box_winner"
-            )
-
-            if isinstance(buybox, dict):
-
-                oferta = extrair_oferta(
-                    resumo,
-                    termo
-                )
-
-                if oferta:
-                    return oferta, diagnostico
-
-        # Se a resposta resumida nao trouxe
-        # buy box, consultamos poucos produtos.
-        for resumo in produtos[:4]:
-
-            product_id = resumo.get("id")
-
-            if not product_id:
-                continue
-
-            produto = consultar_produto(
-                product_id
-            )
-
-            if not produto:
-                continue
-
-            oferta = extrair_oferta(
-                produto,
-                termo
-            )
-
-            if oferta:
-                return oferta, diagnostico
-
-    return None, diagnostico
-
-
-def enviar_telegram(oferta):
-    preco = formatar_preco(
-        oferta["preco"]
-    )
-
-    original = oferta["original"]
-    desconto = oferta["desconto"]
-
-    linhas_preco = f"💰 Preco: {preco}"
-
-    if original and desconto:
-        linhas_preco = (
-            f"~~{formatar_preco(original)}~~\n"
-            f"🔥 {preco}\n"
-            f"📉 {desconto}% OFF"
-        )
-
-    frete = ""
-
-    if oferta["frete_gratis"]:
-        frete = "\n🚚 Frete gratis"
-
-    texto = (
-        "🔥 OFERTA REAL ENCONTRADA!\n\n"
-        f"📦 {oferta['titulo']}\n\n"
-        f"{linhas_preco}"
-        f"{frete}\n\n"
-        f"🔎 Item: {oferta['item_id']}\n\n"
-        "🛒 VER PRODUTO:\n"
-        f"{oferta['link']}"
-    )
-
-    payload = {
-        "chat_id": TELEGRAM_CHAT_ID
-    }
-
-    imagem = oferta["imagem"]
-
-    if imagem:
-        payload["photo"] = imagem
-        payload["caption"] = texto
-        payload["parse_mode"] = "Markdown"
-
-        return telegram_api(
-            "sendPhoto",
-            payload
-        )
-
-    payload["text"] = texto
-    payload["parse_mode"] = "Markdown"
-
-    return telegram_api(
-        "sendMessage",
-        payload
-    )
-
-
-@app.route("/buscar-buybox")
-def buscar_buybox():
+@app.route("/diagnostico-produto")
+def diagnostico():
     if not ML_ACCESS_TOKEN:
         return """
         <h3>Conecte o Mercado Livre primeiro.</h3>
 
         <p>
             <a href="/login">
-                Conectar Mercado Livre
+                Conectar
             </a>
         </p>
         """
 
-    oferta, diagnostico = encontrar_oferta()
+    produtos, status = pesquisar()
 
-    if not oferta:
-        linhas = ""
-
-        for linha in diagnostico:
-            linhas += f"<p>{linha}</p>"
-
-        return f"""
-        <h2>Busca concluida ✅</h2>
-
-        <p>
-            Nenhum Buy Box utilizavel foi
-            encontrado nesta rodada.
-        </p>
-
-        <h3>Diagnostico:</h3>
-
-        {linhas}
-
-        <p>
-            Nenhum produto errado foi enviado.
-        </p>
-        """
-
-    try:
-        resposta_tg = enviar_telegram(
-            oferta
-        )
-
-    except requests.RequestException:
-        return """
-        <h2>Oferta encontrada ✅</h2>
-
-        <p>
-            Mas ocorreu erro ao enviar
-            para o Telegram.
-        </p>
-        """
-
-    if resposta_tg.status_code != 200:
+    if status != "200":
         return (
-            "<h2>Oferta encontrada ✅</h2>"
-            "<p>Telegram respondeu HTTP "
-            f"{resposta_tg.status_code}</p>"
+            "<h3>products/search falhou.</h3>"
+            f"<p>HTTP: {seguro(status)}</p>"
         )
 
-    desconto = oferta["desconto"]
+    if not produtos:
+        return "products/search retornou vazio."
 
-    info_desconto = (
-        f"{desconto}% OFF"
-        if desconto
-        else "sem desconto informado"
+    resumo = produtos[0]
+
+    product_id = resumo.get("id")
+
+    if not product_id:
+        return "Primeiro produto veio sem ID."
+
+    produto, status_detalhe = detalhe(product_id)
+
+    if not produto:
+        return f"""
+        <h2>Produto encontrado</h2>
+
+        <p>ID: {seguro(product_id)}</p>
+
+        <p>
+            /products retornou:
+            {seguro(status_detalhe)}
+        </p>
+        """
+
+    children = produto.get("children_ids") or []
+
+    buybox = produto.get("buy_box_winner")
+
+    permalink = produto.get("permalink")
+
+    campos = [
+        "id",
+        "name",
+        "family_name",
+        "status",
+        "domain_id",
+        "catalog_product_id",
+        "parent_id",
+        "listing_strategy",
+        "permalink",
+        "children_ids",
+        "buy_box_winner"
+    ]
+
+    linhas = ""
+
+    for campo in campos:
+        linhas += (
+            f"<h4>{seguro(campo)}</h4>"
+            f"<pre>{seguro(produto.get(campo))}</pre>"
+        )
+
+    todas_chaves = ", ".join(
+        sorted(produto.keys())
     )
 
-    return f"""
-    <h2>OFERTA REAL ENCONTRADA! 🔥🔥🔥</h2>
+    resultado = f"""
+    <h2>DIAGNOSTICO DO PRODUTO 🔎</h2>
 
     <p>
-        Produto enviado para seu Telegram.
+        <b>Busca:</b> iphone
     </p>
 
     <p>
-        Item: {oferta['item_id']}
+        <b>Product ID:</b>
+        {seguro(product_id)}
     </p>
 
     <p>
-        Desconto:
-        {info_desconto}
+        <b>HTTP detalhe:</b>
+        {seguro(status_detalhe)}
+    </p>
+
+    <hr>
+
+    {linhas}
+
+    <hr>
+
+    <h3>Resumo</h3>
+
+    <p>
+        Children encontrados:
+        <b>{len(children)}</b>
     </p>
 
     <p>
-        Agora confira o produto no Telegram.
+        Tem permalink:
+        <b>{"SIM" if permalink else "NAO"}</b>
     </p>
+
+    <p>
+        Tem Buy Box:
+        <b>{"SIM" if isinstance(buybox, dict) else "NAO"}</b>
+    </p>
+
+    <h3>Todas as chaves recebidas</h3>
+
+    <p>{seguro(todas_chaves)}</p>
     """
+
+    return resultado
 
 
 if __name__ == "__main__":
