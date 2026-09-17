@@ -11,6 +11,9 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
 
 REDIRECT_URI = "https://ofertas-mercado-livre-bot.onrender.com/oauth/callback"
 
+# Token temporario enquanto o servidor estiver ligado
+ML_ACCESS_TOKEN = None
+
 
 def enviar_telegram(texto):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -28,14 +31,10 @@ def home():
     return """
     <h2>Bot Ofertas Mercado Livre BR - Online!</h2>
 
-    <p><a href="/login">Conectar com Mercado Livre</a></p>
-
-    <p><a href="/enviar-teste">
-    Testar Telegram
-    </a></p>
+    <p><a href="/login">1 - Conectar Mercado Livre</a></p>
 
     <p><a href="/buscar-produto">
-    Buscar produto no Mercado Livre
+    2 - Buscar produto e enviar ao Telegram
     </a></p>
     """
 
@@ -54,85 +53,79 @@ def login():
 
 @app.route("/oauth/callback")
 def oauth_callback():
+    global ML_ACCESS_TOKEN
+
     code = request.args.get("code")
 
     if not code:
-        return "Nenhum codigo de autorizacao recebido."
-
-    token_url = "https://api.mercadolibre.com/oauth/token"
-
-    data = {
-        "grant_type": "authorization_code",
-        "client_id": CLIENT_ID,
-        "client_secret": CLIENT_SECRET,
-        "code": code,
-        "redirect_uri": REDIRECT_URI,
-    }
+        return "Nenhum codigo recebido."
 
     response = requests.post(
-        token_url,
-        data=data,
+        "https://api.mercadolibre.com/oauth/token",
+        data={
+            "grant_type": "authorization_code",
+            "client_id": CLIENT_ID,
+            "client_secret": CLIENT_SECRET,
+            "code": code,
+            "redirect_uri": REDIRECT_URI
+        },
         timeout=15
     )
 
     if response.status_code != 200:
-        return "Erro ao obter autorizacao do Mercado Livre."
+        return "Erro ao conectar Mercado Livre."
 
-    token_data = response.json()
+    dados = response.json()
 
-    access_token = token_data.get("access_token")
-    refresh_token = token_data.get("refresh_token")
-    user_id = token_data.get("user_id")
+    ML_ACCESS_TOKEN = dados.get("access_token")
 
-    print("Access token recebido:", bool(access_token))
-    print("Refresh token recebido:", bool(refresh_token))
-    print("User ID recebido:", user_id)
+    if not ML_ACCESS_TOKEN:
+        return "Mercado Livre nao retornou access token."
 
-    return "Mercado Livre conectado com sucesso!"
-
-
-@app.route("/enviar-teste")
-def enviar_teste():
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        return "Telegram nao configurado."
-
-    response = enviar_telegram(
-        "🚀 Bot Ofertas Mercado Livre BR\n\n"
-        "✅ Telegram funcionando!"
-    )
-
-    if response.status_code != 200:
-        return "Erro ao enviar mensagem."
-
-    return "Mensagem enviada! Confira seu Telegram."
+    return """
+    <h2>Mercado Livre conectado! ✅</h2>
+    <p>
+    Agora volte para a pagina inicial
+    e clique em Buscar produto.
+    </p>
+    """
 
 
 @app.route("/buscar-produto")
 def buscar_produto():
+    if not ML_ACCESS_TOKEN:
+        return """
+        <h3>Primeiro conecte sua conta do Mercado Livre.</h3>
+        <a href="/login">Conectar agora</a>
+        """
+
     termo = request.args.get("q", "smartphone")
 
-    url = "https://api.mercadolibre.com/sites/MLB/search"
+    headers = {
+        "Authorization": f"Bearer {ML_ACCESS_TOKEN}"
+    }
 
     try:
         response = requests.get(
-            url,
+            "https://api.mercadolibre.com/sites/MLB/search",
+            headers=headers,
             params={
                 "q": termo,
                 "limit": 10
             },
             timeout=15
         )
+
     except requests.RequestException:
-        return "Erro de conexao com o Mercado Livre."
+        return "Erro de conexao com Mercado Livre."
 
     if response.status_code != 200:
         return (
-            "Mercado Livre nao permitiu a busca. "
+            "Erro na busca do Mercado Livre. "
             f"Codigo: {response.status_code}"
         )
 
-    dados = response.json()
-    produtos = dados.get("results", [])
+    produtos = response.json().get("results", [])
 
     if not produtos:
         return "Nenhum produto encontrado."
@@ -159,18 +152,18 @@ def buscar_produto():
         f"📦 {titulo}\n\n"
         f"💰 {preco_texto}\n\n"
         f"🔗 {link}\n\n"
-        "🧪 Este e apenas o primeiro teste."
+        "🧪 Primeiro produto encontrado pelo bot!"
     )
 
     telegram = enviar_telegram(mensagem)
 
     if telegram.status_code != 200:
-        return "Produto encontrado, mas houve erro ao enviar ao Telegram."
+        return "Produto encontrado, mas o Telegram deu erro."
 
-    return (
-        "Produto encontrado e enviado! "
-        "Confira seu Telegram."
-    )
+    return """
+    <h2>DEU CERTO! 🚀</h2>
+    <p>Produto enviado para seu Telegram.</p>
+    """
 
 
 if __name__ == "__main__":
