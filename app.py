@@ -1,13 +1,12 @@
 from flask import Flask, request
 import os
 import re
-import uuid
-import json
 import io
+import json
+import uuid
 import requests
 
 from bs4 import BeautifulSoup
-from urllib.parse import urljoin, unquote
 from PIL import Image
 
 
@@ -18,17 +17,17 @@ app = Flask(__name__)
 # CONFIGURAÇÕES
 # =========================================================
 
-TELEGRAM_BOT_TOKEN = os.environ.get(
+BOT_TOKEN = os.environ.get(
     "TELEGRAM_BOT_TOKEN",
     ""
 ).strip()
 
-TELEGRAM_ADMIN_CHAT_ID = os.environ.get(
+ADMIN_CHAT_ID = os.environ.get(
     "TELEGRAM_CHAT_ID",
     ""
 ).strip()
 
-TELEGRAM_CHANNEL_ID = os.environ.get(
+CHANNEL_ID = os.environ.get(
     "TELEGRAM_CHANNEL_ID",
     ""
 ).strip()
@@ -41,26 +40,27 @@ WEBHOOK_URL = (
     f"{BASE_URL}/telegram/webhook"
 )
 
-URL_OFERTAS = (
+OFERTAS_URL = (
     "https://www.mercadolivre.com.br/ofertas"
 )
 
-TIMEOUT = 20
+TIMEOUT = 25
 
 
 # =========================================================
-# MEMÓRIA TEMPORÁRIA
+# MEMÓRIA
 # =========================================================
 
-pending = {}
-aguardando_afiliado = {}
+ofertas_pendentes = {}
+
+aguardando_link = {}
 
 
 # =========================================================
 # HEADERS
 # =========================================================
 
-def headers_navegador():
+def headers():
 
     return {
         "User-Agent": (
@@ -68,17 +68,15 @@ def headers_navegador():
             "(Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 "
             "(KHTML, like Gecko) "
-            "Chrome/152.0 Safari/537.36"
+            "Chrome/140.0 Safari/537.36"
         ),
         "Accept-Language": (
-            "pt-BR,pt;q=0.9,en;q=0.8"
+            "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7"
         ),
         "Accept": (
             "text/html,application/xhtml+xml,"
-            "application/xml;q=0.9,image/avif,"
-            "image/webp,*/*;q=0.8"
-        ),
-        "Connection": "keep-alive",
+            "application/xml;q=0.9,image/webp,*/*;q=0.8"
+        )
     }
 
 
@@ -86,50 +84,54 @@ def headers_navegador():
 # TELEGRAM
 # =========================================================
 
-def telegram_api(metodo, payload):
-
-    if not TELEGRAM_BOT_TOKEN:
-        raise RuntimeError(
-            "TELEGRAM_BOT_TOKEN não configurado."
-        )
+def telegram(
+    metodo,
+    dados
+):
 
     url = (
         "https://api.telegram.org/"
-        f"bot{TELEGRAM_BOT_TOKEN}/{metodo}"
+        f"bot{BOT_TOKEN}/{metodo}"
     )
 
     return requests.post(
         url,
-        json=payload,
+        json=dados,
         timeout=TIMEOUT
     )
 
 
-def telegram_api_com_arquivo(
-    metodo,
-    data,
-    arquivo_nome,
-    arquivo_bytes,
-    mime_type="image/jpeg"
+def telegram_foto(
+    chat_id,
+    foto,
+    legenda,
+    teclado=None
 ):
-
-    if not TELEGRAM_BOT_TOKEN:
-        raise RuntimeError(
-            "TELEGRAM_BOT_TOKEN não configurado."
-        )
 
     url = (
         "https://api.telegram.org/"
-        f"bot{TELEGRAM_BOT_TOKEN}/{metodo}"
+        f"bot{BOT_TOKEN}/sendPhoto"
     )
 
     files = {
         "photo": (
-            arquivo_nome,
-            arquivo_bytes,
-            mime_type
+            "produto.jpg",
+            foto,
+            "image/jpeg"
         )
     }
+
+    data = {
+        "chat_id": chat_id,
+        "caption": legenda
+    }
+
+    if teclado:
+
+        data["reply_markup"] = json.dumps(
+            teclado,
+            ensure_ascii=False
+        )
 
     return requests.post(
         url,
@@ -139,54 +141,45 @@ def telegram_api_com_arquivo(
     )
 
 
-def configurar_webhook():
-
-    if not TELEGRAM_BOT_TOKEN:
-        return False
-
-    try:
-
-        resposta = telegram_api(
-            "setWebhook",
-            {
-                "url": WEBHOOK_URL
-            }
-        )
-
-        return resposta.status_code == 200
-
-    except Exception as erro:
-
-        print(
-            "Erro webhook:",
-            erro
-        )
-
-        return False
-
-
 # =========================================================
 # UTILIDADES
 # =========================================================
 
-def limpar_texto(texto):
+def dinheiro(numero):
 
-    return re.sub(
-        r"\s+",
-        " ",
-        texto or ""
-    ).strip()
+    if numero is None:
+        return ""
+
+    try:
+
+        numero = float(numero)
+
+        if numero <= 0:
+            return ""
+
+        return (
+            f"R$ {numero:,.2f}"
+            .replace(",", "X")
+            .replace(".", ",")
+            .replace("X", ".")
+        )
+
+    except Exception:
+
+        return ""
 
 
-def valor_numerico(preco):
+def numero_monetario(valor):
 
-    if not preco:
+    if valor is None:
         return 0
 
     try:
 
+        valor = str(valor)
+
         valor = (
-            str(preco)
+            valor
             .replace("R$", "")
             .replace(" ", "")
             .replace(".", "")
@@ -200,53 +193,10 @@ def valor_numerico(preco):
         return 0
 
 
-def formatar_preco(valor):
-
-    if valor is None:
-        return ""
-
-    valor = str(valor).strip()
-
-    if not valor:
-        return ""
-
-    if "R$" in valor:
-        return valor
-
-    try:
-
-        numero = float(
-            valor.replace(",", ".")
-        )
-
-        return (
-            f"R$ {numero:,.2f}"
-            .replace(",", "X")
-            .replace(".", ",")
-            .replace("X", ".")
-        )
-
-    except Exception:
-
-        return f"R$ {valor}"
-
-
-# =========================================================
-# DESCONTO
-# =========================================================
-
 def calcular_desconto(
-    preco_atual,
-    preco_original
+    atual,
+    original
 ):
-
-    atual = valor_numerico(
-        preco_atual
-    )
-
-    original = valor_numerico(
-        preco_original
-    )
 
     if atual <= 0:
         return 0
@@ -254,855 +204,95 @@ def calcular_desconto(
     if original <= atual:
         return 0
 
-    percentual = (
-        (original - atual)
-        / original
-    ) * 100
-
-    return round(percentual)
-
-
-def desconto_do_texto(texto):
-
-    if not texto:
-        return 0
-
-    padroes = [
-        r"(\d{1,2})%\s*OFF",
-        r"(\d{1,2})%\s*off",
-        r"(\d{1,2})\s*%\s*de\s*desconto",
-    ]
-
-    for padrao in padroes:
-
-        resultado = re.search(
-            padrao,
-            texto,
-            re.IGNORECASE
-        )
-
-        if resultado:
-
-            try:
-
-                numero = int(
-                    resultado.group(1)
-                )
-
-                if 1 <= numero <= 99:
-                    return numero
-
-            except Exception:
-                pass
-
-    return 0
-
-
-# =========================================================
-# PREÇOS
-# =========================================================
-
-def extrair_valores_monetarios(texto):
-
-    if not texto:
-        return []
-
-    resultados = re.findall(
-        r"R\$\s*[\d\.]+(?:,\d{2})?",
-        texto
+    return round(
+        (
+            (original - atual)
+            / original
+        ) * 100
     )
 
-    valores = []
 
-    for valor in resultados:
+# =========================================================
+# ENCONTRAR ID DO MERCADO LIVRE
+# =========================================================
 
-        valor = valor.strip()
+def encontrar_id_produto(url):
 
-        numero = valor_numerico(
-            valor
-        )
+    if not url:
+        return ""
 
-        if numero <= 0:
-            continue
+    encontrado = re.search(
+        r"(MLB\d+)",
+        url.upper()
+    )
 
-        # Evita duplicados
-        if numero not in [
-            item[1]
-            for item in valores
-        ]:
+    if encontrado:
 
-            valores.append(
-                (
-                    valor,
-                    numero
-                )
-            )
+        return encontrado.group(1)
 
-    return valores
+    return ""
 
 
-def extrair_preco_principal(
-    soup,
-    texto
+# =========================================================
+# DADOS DO ITEM DO MERCADO LIVRE
+# =========================================================
+
+def dados_item_mercado_livre(
+    item_id
 ):
 
-    # =====================================================
-    # 1. META PRODUCT PRICE
-    # =====================================================
+    if not item_id:
+        return None
 
-    metas = [
-        ("meta", {
-            "property":
-                "product:price:amount"
-        }),
-        ("meta", {
-            "property":
-                "product:sale_price:amount"
-        }),
-    ]
-
-    for tag_name, attrs in metas:
-
-        tag = soup.find(
-            tag_name,
-            attrs=attrs
-        )
-
-        if tag:
-
-            valor = (
-                tag.get("content")
-                or ""
-            ).strip()
-
-            if valor:
-
-                numero = valor_numerico(
-                    valor
-                )
-
-                if numero > 0:
-
-                    return numero
-
-    # =====================================================
-    # 2. JSON-LD
-    # =====================================================
-
-    scripts = soup.find_all(
-        "script",
-        type="application/ld+json"
+    url = (
+        "https://api.mercadolibre.com/items/"
+        f"{item_id}"
     )
-
-    for script in scripts:
-
-        conteudo = (
-            script.string
-            or script.get_text()
-            or ""
-        ).strip()
-
-        if not conteudo:
-            continue
-
-        try:
-
-            dados = json.loads(
-                conteudo
-            )
-
-        except Exception:
-
-            continue
-
-        blocos = []
-
-        if isinstance(
-            dados,
-            dict
-        ):
-
-            blocos.append(
-                dados
-            )
-
-        elif isinstance(
-            dados,
-            list
-        ):
-
-            blocos.extend(
-                dados
-            )
-
-        for bloco in blocos:
-
-            if not isinstance(
-                bloco,
-                dict
-            ):
-                continue
-
-            offers = bloco.get(
-                "offers"
-            )
-
-            if isinstance(
-                offers,
-                list
-            ):
-
-                offers = (
-                    offers[0]
-                    if offers
-                    else {}
-                )
-
-            if not isinstance(
-                offers,
-                dict
-            ):
-                continue
-
-            price = offers.get(
-                "price"
-            )
-
-            if price is not None:
-
-                numero = valor_numerico(
-                    price
-                )
-
-                if numero > 0:
-
-                    return numero
-
-    # =====================================================
-    # 3. PREÇO PRÓXIMO DO "OFF"
-    #
-    # Exemplo:
-    # R$ 269 R$ 86 68% OFF
-    #
-    # Aqui pegamos R$ 86,
-    # não R$ 28,67 das parcelas.
-    # =====================================================
-
-    padrao_off = re.search(
-        r"(R\$\s*[\d\.]+(?:,\d{2})?)"
-        r".{0,100}?"
-        r"(\d{1,2})%\s*OFF",
-        texto,
-        re.IGNORECASE
-    )
-
-    if padrao_off:
-
-        candidatos = re.findall(
-            r"R\$\s*[\d\.]+(?:,\d{2})?",
-            padrao_off.group(0)
-        )
-
-        if candidatos:
-
-            # O último preço antes do OFF
-            # normalmente é o preço atual.
-            ultimo = candidatos[-1]
-
-            numero = valor_numerico(
-                ultimo
-            )
-
-            if numero > 0:
-                return numero
-
-    return 0
-
-
-def extrair_preco_original(
-    soup,
-    texto,
-    preco_atual
-):
-
-    # =====================================================
-    # 1. JSON-LD
-    # =====================================================
-
-    scripts = soup.find_all(
-        "script",
-        type="application/ld+json"
-    )
-
-    for script in scripts:
-
-        conteudo = (
-            script.string
-            or script.get_text()
-            or ""
-        ).strip()
-
-        if not conteudo:
-            continue
-
-        try:
-
-            dados = json.loads(
-                conteudo
-            )
-
-        except Exception:
-
-            continue
-
-        blocos = []
-
-        if isinstance(
-            dados,
-            dict
-        ):
-
-            blocos.append(
-                dados
-            )
-
-        elif isinstance(
-            dados,
-            list
-        ):
-
-            blocos.extend(
-                dados
-            )
-
-        for bloco in blocos:
-
-            if not isinstance(
-                bloco,
-                dict
-            ):
-                continue
-
-            # Alguns JSONs possuem preço anterior
-            for chave in [
-                "highPrice",
-                "priceBeforeDiscount",
-                "originalPrice",
-                "listPrice",
-            ]:
-
-                valor = bloco.get(
-                    chave
-                )
-
-                if valor:
-
-                    numero = valor_numerico(
-                        valor
-                    )
-
-                    if (
-                        numero
-                        > preco_atual
-                    ):
-
-                        return numero
-
-            offers = bloco.get(
-                "offers"
-            )
-
-            if isinstance(
-                offers,
-                list
-            ):
-
-                offers = (
-                    offers[0]
-                    if offers
-                    else {}
-                )
-
-            if isinstance(
-                offers,
-                dict
-            ):
-
-                for chave in [
-                    "highPrice",
-                    "priceBeforeDiscount",
-                    "originalPrice",
-                    "listPrice",
-                ]:
-
-                    valor = offers.get(
-                        chave
-                    )
-
-                    if valor:
-
-                        numero = valor_numerico(
-                            valor
-                        )
-
-                        if (
-                            numero
-                            > preco_atual
-                        ):
-
-                            return numero
-
-    # =====================================================
-    # 2. PROCURA PADRÃO:
-    #
-    # R$ 269 ... R$ 86 ... 68% OFF
-    # =====================================================
-
-    desconto_site = (
-        desconto_do_texto(
-            texto
-        )
-    )
-
-    if desconto_site:
-
-        padrao = re.search(
-            r"(R\$\s*[\d\.]+(?:,\d{2})?)"
-            r".{0,250}?"
-            r"(R\$\s*[\d\.]+(?:,\d{2})?)"
-            r".{0,100}?"
-            r"(\d{1,2})%\s*OFF",
-            texto,
-            re.IGNORECASE
-        )
-
-        if padrao:
-
-            primeiro = valor_numerico(
-                padrao.group(1)
-            )
-
-            segundo = valor_numerico(
-                padrao.group(2)
-            )
-
-            if (
-                primeiro > preco_atual
-                and abs(
-                    calcular_desconto(
-                        preco_atual,
-                        primeiro
-                    )
-                    - desconto_site
-                ) <= 2
-            ):
-
-                return primeiro
-
-            if (
-                segundo > preco_atual
-                and abs(
-                    calcular_desconto(
-                        preco_atual,
-                        segundo
-                    )
-                    - desconto_site
-                ) <= 2
-            ):
-
-                return segundo
-
-    # =====================================================
-    # 3. USA O DESCONTO PUBLICADO
-    #
-    # Se sabemos preço atual + % OFF,
-    # podemos recuperar o preço original.
-    # =====================================================
-
-    if (
-        preco_atual > 0
-        and desconto_site > 0
-        and desconto_site < 100
-    ):
-
-        original = (
-            preco_atual
-            / (
-                1
-                - (
-                    desconto_site
-                    / 100
-                )
-            )
-        )
-
-        # Só aceita valores razoáveis
-        if original > preco_atual:
-
-            return round(
-                original,
-                2
-            )
-
-    # =====================================================
-    # 4. FALLBACK PELO TEXTO
-    #
-    # Ignora explicitamente parcelas.
-    # =====================================================
-
-    valores = extrair_valores_monetarios(
-        texto
-    )
-
-    candidatos = []
-
-    for texto_valor, numero in valores:
-
-        if numero <= preco_atual:
-            continue
-
-        candidatos.append(
-            (
-                texto_valor,
-                numero
-            )
-        )
-
-    if candidatos:
-
-        # Se houver vários, prefere o menor
-        # acima do preço atual.
-        candidatos.sort(
-            key=lambda item: item[1]
-        )
-
-        return candidatos[0][1]
-
-    return 0
-
-
-# =========================================================
-# NOME
-# =========================================================
-
-def nome_pelo_link(url):
 
     try:
 
-        url_limpa = unquote(
-            url.split("?")[0]
+        resposta = requests.get(
+            url,
+            headers=headers(),
+            timeout=TIMEOUT
         )
 
-        partes = re.split(
-            r"/p/|/MLB",
-            url_limpa,
-            flags=re.IGNORECASE
+        print(
+            "API ITEM:",
+            item_id,
+            resposta.status_code
         )
 
-        if not partes:
-            return ""
+        if resposta.status_code != 200:
 
-        caminho = partes[0]
+            print(
+                "Resposta API:",
+                resposta.text[:500]
+            )
 
-        partes_caminho = (
-            caminho
-            .rstrip("/")
-            .split("/")
+            return None
+
+        dados = resposta.json()
+
+        return dados
+
+    except Exception as erro:
+
+        print(
+            "Erro API item:",
+            erro
         )
 
-        if not partes_caminho:
-            return ""
-
-        slug = partes_caminho[-1]
-
-        if not slug:
-            return ""
-
-        slug = slug.replace(
-            "-",
-            " "
-        )
-
-        slug = re.sub(
-            r"\s+",
-            " ",
-            slug
-        ).strip()
-
-        if len(slug) < 5:
-            return ""
-
-        palavras = []
-
-        minusculas = {
-            "de",
-            "da",
-            "do",
-            "das",
-            "dos",
-            "e",
-            "em",
-            "com",
-            "para",
-        }
-
-        for palavra in slug.split():
-
-            if palavra.lower() in minusculas:
-
-                palavras.append(
-                    palavra.lower()
-                )
-
-            else:
-
-                palavras.append(
-                    palavra.capitalize()
-                )
-
-        return " ".join(
-            palavras
-        )[:300]
-
-    except Exception:
-
-        return ""
-
-
-# =========================================================
-# IMAGEM
-# =========================================================
-
-def imagem_valida(url):
-
-    if not url:
-        return False
-
-    url_lower = url.lower()
-
-    bloqueios = [
-        "favicon",
-        "sprite",
-        "avatar",
-        "logo",
-    ]
-
-    for bloqueio in bloqueios:
-
-        if bloqueio in url_lower:
-            return False
-
-    return (
-        url.startswith("http://")
-        or url.startswith("https://")
-    )
-
-
-def imagem_do_link(link_tag):
-
-    if not link_tag:
-        return ""
-
-    img = link_tag.find(
-        "img"
-    )
-
-    if not img:
-        return ""
-
-    atributos = [
-        "src",
-        "data-src",
-        "data-original",
-        "data-lazy",
-        "data-image",
-        "data-zoom",
-        "data-srcset",
-    ]
-
-    for atributo in atributos:
-
-        valor = img.get(
-            atributo
-        )
-
-        if not valor:
-            continue
-
-        if atributo == "data-srcset":
-
-            valor = (
-                valor
-                .split(",")[0]
-                .strip()
-                .split(" ")[0]
-            )
-
-        if valor.startswith("//"):
-            valor = "https:" + valor
-
-        if valor.startswith("/"):
-            valor = urljoin(
-                "https://www.mercadolivre.com.br",
-                valor
-            )
-
-        if imagem_valida(valor):
-            return valor
-
-    return ""
-
-
-def procurar_imagem_no_html(
-    soup
-):
-
-    # OG IMAGE
-    og_image = soup.find(
-        "meta",
-        property="og:image"
-    )
-
-    if og_image:
-
-        valor = (
-            og_image.get(
-                "content"
-            )
-            or ""
-        ).strip()
-
-        if imagem_valida(valor):
-            return valor
-
-    # TWITTER
-    twitter_image = soup.find(
-        "meta",
-        attrs={
-            "name": "twitter:image"
-        }
-    )
-
-    if twitter_image:
-
-        valor = (
-            twitter_image.get(
-                "content"
-            )
-            or ""
-        ).strip()
-
-        if imagem_valida(valor):
-            return valor
-
-    # IMG
-    for img in soup.find_all(
-        "img"
-    ):
-
-        atributos = [
-            "src",
-            "data-src",
-            "data-original",
-            "data-lazy",
-            "data-image",
-            "data-zoom",
-            "data-fallback-src",
-            "data-srcset",
-        ]
-
-        for atributo in atributos:
-
-            valor = img.get(
-                atributo
-            )
-
-            if not valor:
-                continue
-
-            if atributo == "data-srcset":
-
-                valor = (
-                    valor
-                    .split(",")[0]
-                    .strip()
-                    .split(" ")[0]
-                )
-
-            if valor.startswith("//"):
-                valor = "https:" + valor
-
-            if valor.startswith("/"):
-                valor = urljoin(
-                    "https://www.mercadolivre.com.br",
-                    valor
-                )
-
-            if imagem_valida(valor):
-                return valor
-
-    # SCRIPTS
-    for script in soup.find_all(
-        "script"
-    ):
-
-        conteudo = (
-            script.string
-            or script.get_text()
-            or ""
-        )
-
-        if not conteudo:
-            continue
-
-        encontrados = re.findall(
-            r'https?://[^"\'\s<>]+',
-            conteudo
-        )
-
-        for candidato in encontrados:
-
-            candidato = (
-                candidato
-                .replace(
-                    "\\u002F",
-                    "/"
-                )
-                .replace(
-                    "\\/",
-                    "/"
-                )
-                .replace(
-                    "\\u003A",
-                    ":"
-                )
-            )
-
-            candidato_lower = (
-                candidato.lower()
-            )
-
-            if (
-                "mlstatic.com"
-                in candidato_lower
-                or "mercadolibre"
-                in candidato_lower
-            ):
-
-                if imagem_valida(
-                    candidato
-                ):
-
-                    return candidato
-
-    return ""
+        return None
 
 
 # =========================================================
 # BAIXAR IMAGEM
 # =========================================================
 
-def baixar_imagem(url):
+def baixar_imagem(
+    url
+):
 
     if not url:
         return None
@@ -1111,17 +301,17 @@ def baixar_imagem(url):
 
         resposta = requests.get(
             url,
-            headers=headers_navegador(),
+            headers=headers(),
             timeout=TIMEOUT
         )
 
+        print(
+            "IMAGEM:",
+            resposta.status_code,
+            url[:200]
+        )
+
         if resposta.status_code != 200:
-
-            print(
-                "Imagem HTTP:",
-                resposta.status_code
-            )
-
             return None
 
         if not resposta.content:
@@ -1139,9 +329,8 @@ def baixar_imagem(url):
                 "RGB"
             )
 
-        largura, altura = (
-            imagem.size
-        )
+        # Reduz imagens enormes
+        largura, altura = imagem.size
 
         limite = 1600
 
@@ -1162,8 +351,7 @@ def baixar_imagem(url):
         imagem.save(
             memoria,
             format="JPEG",
-            quality=90,
-            optimize=True
+            quality=90
         )
 
         memoria.seek(0)
@@ -1173,7 +361,7 @@ def baixar_imagem(url):
     except Exception as erro:
 
         print(
-            "Erro baixando imagem:",
+            "ERRO IMAGEM:",
             erro
         )
 
@@ -1181,588 +369,294 @@ def baixar_imagem(url):
 
 
 # =========================================================
-# EXTRAIR CARDS DAS OFERTAS
+# BUSCAR LINKS DE PRODUTOS
 # =========================================================
 
-def extrair_cards(html):
-
-    soup = BeautifulSoup(
-        html,
-        "html.parser"
-    )
-
-    candidatos = []
-
-    for link_tag in soup.find_all(
-        "a",
-        href=True
-    ):
-
-        href = (
-            link_tag.get("href")
-            or ""
-        ).strip()
-
-        if not href:
-            continue
-
-        eh_produto = (
-            "/p/" in href
-            or "produto.mercadolivre.com.br"
-            in href
-            or "/MLB-" in href
-        )
-
-        if not eh_produto:
-            continue
-
-        imagem = imagem_do_link(
-            link_tag
-        )
-
-        card = link_tag
-
-        melhor_card = None
-
-        for _ in range(6):
-
-            if not card.parent:
-                break
-
-            card = card.parent
-
-            texto_card = limpar_texto(
-                card.get_text(
-                    " ",
-                    strip=True
-                )
-            )
-
-            desconto = desconto_do_texto(
-                texto_card
-            )
-
-            if desconto > 0:
-
-                melhor_card = card
-                break
-
-        if melhor_card is not None:
-            card = melhor_card
-
-        texto_card = limpar_texto(
-            card.get_text(
-                " ",
-                strip=True
-            )
-        )
-
-        desconto = desconto_do_texto(
-            texto_card
-        )
-
-        if desconto <= 0:
-            continue
-
-        titulo = limpar_texto(
-            link_tag.get_text(
-                " ",
-                strip=True
-            )
-        )
-
-        if (
-            not titulo
-            or titulo.lower()
-            in [
-                "mercado livre",
-                "ver oferta",
-                "comprar",
-                "oferta",
-            ]
-        ):
-
-            titulo = ""
-
-            for tag in card.find_all(
-                [
-                    "h1",
-                    "h2",
-                    "h3",
-                    "h4",
-                    "p",
-                ]
-            ):
-
-                candidato = limpar_texto(
-                    tag.get_text(
-                        " ",
-                        strip=True
-                    )
-                )
-
-                if len(candidato) < 10:
-                    continue
-
-                if candidato.lower() in [
-                    "mercado livre",
-                    "ver oferta",
-                    "comprar",
-                ]:
-                    continue
-
-                if len(candidato) > len(
-                    titulo
-                ):
-                    titulo = candidato
-
-        url = urljoin(
-            "https://www.mercadolivre.com.br",
-            href
-        )
-
-        candidatos.append({
-
-            "titulo_card":
-                titulo,
-
-            "desconto_card":
-                desconto,
-
-            "link":
-                url,
-
-            "imagem_card":
-                imagem,
-
-            "texto_card":
-                texto_card[:5000],
-        })
-
-    # Remove duplicados
-    unicos = {}
-
-    for oferta in candidatos:
-
-        link = oferta["link"]
-
-        if link not in unicos:
-
-            unicos[link] = oferta
-
-    ofertas = list(
-        unicos.values()
-    )
-
-    ofertas.sort(
-        key=lambda x: x.get(
-            "desconto_card",
-            0
-        ),
-        reverse=True
-    )
-
-    return ofertas
-
-
-# =========================================================
-# ENRIQUECER PRODUTO
-# =========================================================
-
-def enriquecer_produto(
-    oferta
-):
-
-    link = oferta.get(
-        "link",
-        ""
-    )
-
-    titulo = nome_pelo_link(
-        link
-    )
-
-    if not titulo:
-
-        titulo = oferta.get(
-            "titulo_card",
-            ""
-        )
-
-    imagem = oferta.get(
-        "imagem_card",
-        ""
-    )
-
-    # -----------------------------------------------------
-    # ABRE PÁGINA DO PRODUTO
-    # -----------------------------------------------------
+def buscar_links_ofertas():
 
     try:
 
         resposta = requests.get(
-            link,
-            headers=headers_navegador(),
-            timeout=TIMEOUT,
-            allow_redirects=True
-        )
-
-    except Exception as erro:
-
-        print(
-            "Erro abrindo produto:",
-            erro
-        )
-
-        oferta["titulo"] = (
-            titulo
-            or "Produto Mercado Livre"
-        )
-
-        oferta["imagem"] = imagem
-        oferta["preco"] = ""
-        oferta["preco_original"] = ""
-        oferta["desconto"] = 0
-
-        return oferta
-
-    if resposta.status_code != 200:
-
-        print(
-            "Produto HTTP:",
-            resposta.status_code
-        )
-
-        oferta["titulo"] = (
-            titulo
-            or "Produto Mercado Livre"
-        )
-
-        oferta["imagem"] = imagem
-        oferta["preco"] = ""
-        oferta["preco_original"] = ""
-        oferta["desconto"] = 0
-
-        return oferta
-
-    soup = BeautifulSoup(
-        resposta.text,
-        "html.parser"
-    )
-
-    texto_pagina = limpar_texto(
-        soup.get_text(
-            " ",
-            strip=True
-        )
-    )
-
-    # =====================================================
-    # NOME
-    # =====================================================
-
-    h1 = soup.find(
-        "h1"
-    )
-
-    if h1:
-
-        nome = limpar_texto(
-            h1.get_text(
-                " ",
-                strip=True
-            )
-        )
-
-        if len(nome) >= 10:
-
-            titulo = nome
-
-    if not titulo:
-
-        og_title = soup.find(
-            "meta",
-            property="og:title"
-        )
-
-        if og_title:
-
-            titulo = (
-                og_title.get(
-                    "content"
-                )
-                or ""
-            ).strip()
-
-    # =====================================================
-    # IMAGEM
-    # =====================================================
-
-    imagem_pagina = (
-        procurar_imagem_no_html(
-            soup
-        )
-    )
-
-    if imagem_pagina:
-
-        imagem = imagem_pagina
-
-    # =====================================================
-    # PREÇO ATUAL
-    # =====================================================
-
-    preco_atual = (
-        extrair_preco_principal(
-            soup,
-            texto_pagina
-        )
-    )
-
-    # =====================================================
-    # PREÇO ORIGINAL
-    # =====================================================
-
-    preco_original = (
-        extrair_preco_original(
-            soup,
-            texto_pagina,
-            preco_atual
-        )
-    )
-
-    # =====================================================
-    # DESCONTO
-    # =====================================================
-
-    desconto_calculado = (
-        calcular_desconto(
-            preco_atual,
-            preco_original
-        )
-    )
-
-    desconto_site = (
-        desconto_do_texto(
-            texto_pagina
-        )
-    )
-
-    # Se o cálculo bate com o desconto
-    # mostrado pelo Mercado Livre,
-    # usa o calculado.
-    if desconto_calculado > 0:
-
-        desconto = desconto_calculado
-
-    else:
-
-        desconto = desconto_site
-
-    # =====================================================
-    # FALLBACK DO CARD
-    # =====================================================
-
-    if preco_atual <= 0:
-
-        # Tenta encontrar um preço no card,
-        # mas NUNCA usa parcelas como preço
-        texto_card = oferta.get(
-            "texto_card",
-            ""
-        )
-
-        preco_atual = (
-            extrair_preco_principal(
-                BeautifulSoup(
-                    "",
-                    "html.parser"
-                ),
-                texto_card
-            )
-        )
-
-    # =====================================================
-    # RESULTADO
-    # =====================================================
-
-    oferta["titulo"] = (
-        limpar_texto(
-            titulo
-        )[:300]
-        or "Produto Mercado Livre"
-    )
-
-    oferta["imagem"] = imagem
-
-    oferta["preco"] = (
-        formatar_preco(
-            preco_atual
-        )
-    )
-
-    oferta["preco_original"] = (
-        formatar_preco(
-            preco_original
-        )
-    )
-
-    oferta["desconto"] = desconto
-
-    # Debug útil no Render
-    print(
-        "========================================"
-    )
-
-    print(
-        "PRODUTO:",
-        oferta["titulo"]
-    )
-
-    print(
-        "PREÇO ATUAL:",
-        oferta["preco"]
-    )
-
-    print(
-        "PREÇO ORIGINAL:",
-        oferta["preco_original"]
-    )
-
-    print(
-        "DESCONTO:",
-        oferta["desconto"],
-        "%"
-    )
-
-    print(
-        "IMAGEM:",
-        oferta["imagem"]
-    )
-
-    print(
-        "========================================"
-    )
-
-    return oferta
-
-
-# =========================================================
-# BUSCAR OFERTAS
-# =========================================================
-
-def buscar_ofertas():
-
-    try:
-
-        resposta = requests.get(
-            URL_OFERTAS,
-            headers=headers_navegador(),
+            OFERTAS_URL,
+            headers=headers(),
             timeout=TIMEOUT
         )
 
     except Exception as erro:
 
         print(
-            "Erro busca:",
+            "Erro ofertas:",
             erro
         )
 
-        return [], "ERRO_CONEXAO"
+        return []
+
+    print(
+        "OFERTAS HTTP:",
+        resposta.status_code
+    )
 
     if resposta.status_code != 200:
 
-        return [], str(
-            resposta.status_code
-        )
+        return []
 
-    ofertas = extrair_cards(
-        resposta.text
+    soup = BeautifulSoup(
+        resposta.text,
+        "html.parser"
     )
 
-    if not ofertas:
+    encontrados = {}
 
-        return [], "SEM_OFERTAS"
+    for link in soup.find_all(
+        "a",
+        href=True
+    ):
 
-    finais = []
+        href = (
+            link.get("href")
+            or ""
+        ).strip()
 
-    for oferta in ofertas[:10]:
-
-        oferta = enriquecer_produto(
-            oferta
-        )
-
-        if not oferta.get(
-            "titulo"
-        ):
+        if not href:
             continue
 
-        if not oferta.get(
-            "preco"
-        ):
-            continue
-
-        finais.append(
-            oferta
+        item_id = encontrar_id_produto(
+            href
         )
 
-    return finais, "200"
+        if not item_id:
+            continue
+
+        url = href
+
+        if url.startswith("/"):
+
+            url = (
+                "https://www.mercadolivre.com.br"
+                + url
+            )
+
+        encontrados[item_id] = url
+
+    print(
+        "PRODUTOS ENCONTRADOS:",
+        len(encontrados)
+    )
+
+    return list(
+        encontrados.items()
+    )
+
+
+# =========================================================
+# MONTAR PRODUTO
+# =========================================================
+
+def montar_produto(
+    item_id,
+    url_original
+):
+
+    dados = dados_item_mercado_livre(
+        item_id
+    )
+
+    if not dados:
+
+        return None
+
+    # -----------------------------------------------------
+    # NOME
+    # -----------------------------------------------------
+
+    nome = (
+        dados.get("title")
+        or
+        dados.get("family_name")
+        or
+        "Produto Mercado Livre"
+    )
+
+    # -----------------------------------------------------
+    # PREÇO ATUAL
+    # -----------------------------------------------------
+
+    preco = numero_monetario(
+        dados.get("price")
+    )
+
+    # -----------------------------------------------------
+    # PREÇO ORIGINAL
+    # -----------------------------------------------------
+
+    original = numero_monetario(
+        dados.get("original_price")
+    )
+
+    # -----------------------------------------------------
+    # IMAGEM
+    # -----------------------------------------------------
+
+    imagem = (
+        dados.get("thumbnail")
+        or ""
+    )
+
+    # Algumas respostas podem trazer
+    # pictures em vez de thumbnail
+    if not imagem:
+
+        pictures = (
+            dados.get("pictures")
+            or []
+        )
+
+        if pictures:
+
+            primeira = pictures[0]
+
+            if isinstance(
+                primeira,
+                dict
+            ):
+
+                imagem = (
+                    primeira.get("secure_url")
+                    or
+                    primeira.get("url")
+                    or
+                    ""
+                )
+
+    # -----------------------------------------------------
+    # LINK
+    # -----------------------------------------------------
+
+    permalink = (
+        dados.get("permalink")
+        or url_original
+    )
+
+    # -----------------------------------------------------
+    # DESCONTO
+    # -----------------------------------------------------
+
+    desconto = calcular_desconto(
+        preco,
+        original
+    )
+
+    # -----------------------------------------------------
+    # Se original não veio da API,
+    # NÃO mostramos R$ 0,00.
+    # -----------------------------------------------------
+
+    if original <= preco:
+
+        original = 0
+
+    produto = {
+
+        "id":
+            item_id,
+
+        "titulo":
+            str(nome).strip(),
+
+        "preco":
+            preco,
+
+        "original":
+            original,
+
+        "desconto":
+            desconto,
+
+        "imagem":
+            imagem,
+
+        "link":
+            permalink
+    }
+
+    print("")
+    print(
+        "======================================"
+    )
+    print(
+        "PRODUTO:",
+        produto["titulo"]
+    )
+    print(
+        "ID:",
+        produto["id"]
+    )
+    print(
+        "PREÇO:",
+        produto["preco"]
+    )
+    print(
+        "ORIGINAL:",
+        produto["original"]
+    )
+    print(
+        "DESCONTO:",
+        produto["desconto"],
+        "%"
+    )
+    print(
+        "IMAGEM:",
+        produto["imagem"]
+    )
+    print(
+        "LINK:",
+        produto["link"]
+    )
+    print(
+        "======================================"
+    )
+    print("")
+
+    return produto
 
 
 # =========================================================
 # TEXTO DE APROVAÇÃO
 # =========================================================
 
-def montar_texto_aprovacao(
-    oferta
+def texto_aprovacao(
+    produto
 ):
-
-    titulo = oferta.get(
-        "titulo",
-        "Produto Mercado Livre"
-    )
-
-    preco = oferta.get(
-        "preco",
-        ""
-    )
-
-    preco_original = oferta.get(
-        "preco_original",
-        ""
-    )
-
-    desconto = oferta.get(
-        "desconto",
-        0
-    )
 
     texto = (
         "🔥 OFERTA ENCONTRADA!\n\n"
-        f"📦 {titulo}\n\n"
+        f"📦 {produto['titulo']}\n\n"
     )
 
-    if preco:
+    if produto["preco"] > 0:
 
         texto += (
-            f"🔥 Por: {preco}\n"
+            f"🔥 Por: "
+            f"{dinheiro(produto['preco'])}\n"
         )
 
-    if preco_original:
+    if produto["original"] > 0:
 
         texto += (
-            f"💵 De: {preco_original}\n"
+            f"💵 De: "
+            f"{dinheiro(produto['original'])}\n"
         )
 
-    if desconto:
+    if produto["desconto"] > 0:
 
         texto += (
-            f"📉 {desconto}% OFF\n"
+            f"📉 "
+            f"{produto['desconto']}% OFF\n"
         )
 
     texto += (
         "\n🔗 Link normal:\n"
-        f"{oferta['link']}\n\n"
+        f"{produto['link']}\n\n"
         "⚠️ Confira a oferta antes de publicar."
     )
 
@@ -1773,17 +667,13 @@ def montar_texto_aprovacao(
 # ENVIAR PARA APROVAÇÃO
 # =========================================================
 
-def enviar_oferta_para_aprovacao(
-    oferta
+def enviar_aprovacao(
+    produto
 ):
 
     token = uuid.uuid4().hex[:12]
 
-    pending[token] = oferta
-
-    texto = montar_texto_aprovacao(
-        oferta
-    )
+    ofertas_pendentes[token] = produto
 
     teclado = {
         "inline_keyboard": [
@@ -1802,76 +692,49 @@ def enviar_oferta_para_aprovacao(
         ]
     }
 
-    imagem_url = oferta.get(
-        "imagem",
-        ""
+    texto = texto_aprovacao(
+        produto
     )
 
-    imagem_bytes = None
+    imagem = baixar_imagem(
+        produto["imagem"]
+    )
 
-    if imagem_url:
+    if imagem:
 
-        imagem_bytes = baixar_imagem(
-            imagem_url
+        resposta = telegram_foto(
+            ADMIN_CHAT_ID,
+            imagem,
+            texto,
+            teclado
         )
 
-    # =====================================================
-    # ENVIA FOTO
-    # =====================================================
-
-    if imagem_bytes:
-
-        try:
-
-            resposta = (
-                telegram_api_com_arquivo(
-                    "sendPhoto",
-
-                    {
-                        "chat_id":
-                            TELEGRAM_ADMIN_CHAT_ID,
-
-                        "caption":
-                            texto,
-
-                        "reply_markup":
-                            json.dumps(
-                                teclado,
-                                ensure_ascii=False
-                            )
-                    },
-
-                    "produto.jpg",
-                    imagem_bytes,
-                    "image/jpeg"
-                )
-            )
-
-            if resposta.status_code == 200:
-
-                return resposta
+        if resposta.status_code == 200:
 
             print(
-                "Telegram rejeitou foto:",
-                resposta.text
+                "✅ Oferta enviada COM FOTO"
             )
 
-        except Exception as erro:
+            return resposta
 
-            print(
-                "Erro enviando foto:",
-                erro
-            )
+        print(
+            "Erro Telegram foto:",
+            resposta.text
+        )
 
-    # =====================================================
-    # FALLBACK TEXTO
-    # =====================================================
+    # -----------------------------------------------------
+    # FALLBACK
+    # -----------------------------------------------------
 
-    resposta = telegram_api(
+    print(
+        "⚠️ Sem imagem. Enviando texto."
+    )
+
+    return telegram(
         "sendMessage",
         {
             "chat_id":
-                TELEGRAM_ADMIN_CHAT_ID,
+                ADMIN_CHAT_ID,
 
             "text":
                 texto,
@@ -1881,14 +744,133 @@ def enviar_oferta_para_aprovacao(
         }
     )
 
-    return resposta
+
+# =========================================================
+# BUSCAR OFERTAS
+# =========================================================
+
+def executar_busca():
+
+    links = buscar_links_ofertas()
+
+    if not links:
+
+        return 0
+
+    enviadas = 0
+
+    vistos = set()
+
+    for item_id, url in links:
+
+        if item_id in vistos:
+            continue
+
+        vistos.add(item_id)
+
+        produto = montar_produto(
+            item_id,
+            url
+        )
+
+        if not produto:
+            continue
+
+        # Precisa ter preço real
+        if produto["preco"] <= 0:
+            continue
+
+        # Precisa ter desconto real
+        if produto["original"] <= produto["preco"]:
+            continue
+
+        if produto["desconto"] <= 0:
+            continue
+
+        try:
+
+            resposta = enviar_aprovacao(
+                produto
+            )
+
+            if resposta.status_code == 200:
+
+                enviadas += 1
+
+        except Exception as erro:
+
+            print(
+                "Erro enviando oferta:",
+                erro
+            )
+
+        # Não manda 20 ofertas de uma vez
+        if enviadas >= 3:
+            break
+
+    return enviadas
 
 
 # =========================================================
-# CALLBACK
+# PUBLICAR NO CANAL
 # =========================================================
 
-def responder_callback(
+def publicar_canal(
+    produto,
+    link_afiliado
+):
+
+    texto = (
+        "🔥 OFERTA DO DIA! 🔥\n\n"
+        f"📦 {produto['titulo']}\n\n"
+        f"🔥 Por: "
+        f"{dinheiro(produto['preco'])}\n"
+        f"💵 De: "
+        f"{dinheiro(produto['original'])}\n"
+        f"📉 "
+        f"{produto['desconto']}% OFF\n\n"
+        "🛒 COMPRAR AGORA:\n"
+        f"{link_afiliado}"
+    )
+
+    imagem = baixar_imagem(
+        produto["imagem"]
+    )
+
+    if imagem:
+
+        resposta = telegram_foto(
+            CHANNEL_ID,
+            imagem,
+            texto
+        )
+
+        if resposta.status_code == 200:
+
+            return resposta
+
+        print(
+            "Erro foto canal:",
+            resposta.text
+        )
+
+    return telegram(
+        "sendMessage",
+        {
+            "chat_id":
+                CHANNEL_ID,
+
+            "text":
+                texto
+        }
+    )
+
+
+# =========================================================
+# CALLBACK DO BOT
+# =========================================================
+
+def callback_telegram(
     callback
 ):
 
@@ -1905,7 +887,7 @@ def responder_callback(
 
         try:
 
-            telegram_api(
+            telegram(
                 "answerCallbackQuery",
                 {
                     "callback_query_id":
@@ -1914,11 +896,9 @@ def responder_callback(
             )
 
         except Exception:
-
             pass
 
     if ":" not in data:
-
         return
 
     acao, token = data.split(
@@ -1926,12 +906,11 @@ def responder_callback(
         1
     )
 
-    oferta = pending.get(
+    produto = ofertas_pendentes.get(
         token
     )
 
-    if not oferta:
-
+    if not produto:
         return
 
     mensagem = callback.get(
@@ -1950,7 +929,7 @@ def responder_callback(
     )
 
     if chat_id != str(
-        TELEGRAM_ADMIN_CHAT_ID
+        ADMIN_CHAT_ID
     ):
 
         return
@@ -1961,22 +940,19 @@ def responder_callback(
 
     if acao == "descartar":
 
-        pending.pop(
+        ofertas_pendentes.pop(
             token,
             None
         )
 
-        telegram_api(
+        telegram(
             "sendMessage",
             {
                 "chat_id":
                     chat_id,
 
                 "text":
-                    (
-                        "❌ Oferta descartada.\n\n"
-                        "Ela não será publicada."
-                    )
+                    "❌ Oferta descartada."
             }
         )
 
@@ -1988,16 +964,16 @@ def responder_callback(
 
     if acao == "aprovar":
 
-        pending.pop(
+        ofertas_pendentes.pop(
             token,
             None
         )
 
-        aguardando_afiliado[
+        aguardando_link[
             chat_id
-        ] = oferta
+        ] = produto
 
-        telegram_api(
+        telegram(
             "sendMessage",
             {
                 "chat_id":
@@ -2005,149 +981,20 @@ def responder_callback(
 
                 "text":
                     (
-                        "💰 OFERTA APROVADA!\n\n"
-                        "Agora envie seu "
-                        "LINK DE AFILIADO.\n\n"
-                        "Assim que receber, "
-                        "vou publicar no canal."
+                        "✅ OFERTA APROVADA!\n\n"
+                        "Agora me mande seu "
+                        "LINK DE AFILIADO do "
+                        "Mercado Livre."
                     )
             }
         )
 
 
 # =========================================================
-# PUBLICAR NO CANAL
+# MENSAGEM RECEBIDA
 # =========================================================
 
-def publicar_oferta(
-    oferta,
-    link_afiliado
-):
-
-    titulo = oferta.get(
-        "titulo",
-        "Oferta Mercado Livre"
-    )
-
-    preco = oferta.get(
-        "preco",
-        ""
-    )
-
-    preco_original = oferta.get(
-        "preco_original",
-        ""
-    )
-
-    desconto = oferta.get(
-        "desconto",
-        0
-    )
-
-    texto = (
-        "🔥 OFERTA DO DIA! 🔥\n\n"
-        f"📦 {titulo}\n\n"
-    )
-
-    if preco:
-
-        texto += (
-            f"🔥 Por: {preco}\n"
-        )
-
-    if preco_original:
-
-        texto += (
-            f"💵 De: {preco_original}\n"
-        )
-
-    if desconto:
-
-        texto += (
-            f"📉 {desconto}% OFF\n"
-        )
-
-    texto += (
-        "\n🛒 COMPRAR AGORA:\n"
-        f"{link_afiliado}"
-    )
-
-    imagem_url = oferta.get(
-        "imagem",
-        ""
-    )
-
-    imagem_bytes = None
-
-    if imagem_url:
-
-        imagem_bytes = baixar_imagem(
-            imagem_url
-        )
-
-    # =====================================================
-    # PUBLICAR COM FOTO
-    # =====================================================
-
-    if imagem_bytes:
-
-        try:
-
-            resposta = (
-                telegram_api_com_arquivo(
-                    "sendPhoto",
-
-                    {
-                        "chat_id":
-                            TELEGRAM_CHANNEL_ID,
-
-                        "caption":
-                            texto
-                    },
-
-                    "produto.jpg",
-                    imagem_bytes,
-                    "image/jpeg"
-                )
-            )
-
-            if resposta.status_code == 200:
-
-                return resposta
-
-            print(
-                "Erro foto canal:",
-                resposta.text
-            )
-
-        except Exception as erro:
-
-            print(
-                "Erro foto canal:",
-                erro
-            )
-
-    # =====================================================
-    # FALLBACK TEXTO
-    # =====================================================
-
-    return telegram_api(
-        "sendMessage",
-        {
-            "chat_id":
-                TELEGRAM_CHANNEL_ID,
-
-            "text":
-                texto
-        }
-    )
-
-
-# =========================================================
-# RECEBER LINK DE AFILIADO
-# =========================================================
-
-def processar_mensagem(
+def mensagem_telegram(
     message
 ):
 
@@ -2163,7 +1010,7 @@ def processar_mensagem(
     )
 
     if chat_id != str(
-        TELEGRAM_ADMIN_CHAT_ID
+        ADMIN_CHAT_ID
     ):
 
         return
@@ -2176,15 +1023,13 @@ def processar_mensagem(
     ).strip()
 
     if not texto:
-
         return
 
-    oferta = aguardando_afiliado.get(
+    produto = aguardando_link.get(
         chat_id
     )
 
-    if not oferta:
-
+    if not produto:
         return
 
     if not re.match(
@@ -2193,7 +1038,7 @@ def processar_mensagem(
         re.IGNORECASE
     ):
 
-        telegram_api(
+        telegram(
             "sendMessage",
             {
                 "chat_id":
@@ -2201,7 +1046,7 @@ def processar_mensagem(
 
                 "text":
                     (
-                        "⚠️ Envie um link válido "
+                        "⚠️ Mande um link válido "
                         "começando com https://"
                     )
             }
@@ -2209,9 +1054,9 @@ def processar_mensagem(
 
         return
 
-    if not TELEGRAM_CHANNEL_ID:
+    if not CHANNEL_ID:
 
-        telegram_api(
+        telegram(
             "sendMessage",
             {
                 "chat_id":
@@ -2219,8 +1064,8 @@ def processar_mensagem(
 
                 "text":
                     (
-                        "⚠️ TELEGRAM_CHANNEL_ID "
-                        "não está configurado."
+                        "❌ TELEGRAM_CHANNEL_ID "
+                        "não configurado no Render."
                     )
             }
         )
@@ -2229,50 +1074,60 @@ def processar_mensagem(
 
     try:
 
-        resposta = publicar_oferta(
-            oferta,
+        resposta = publicar_canal(
+            produto,
             texto
         )
 
     except Exception as erro:
 
         print(
-            "Erro publicação:",
+            "Erro publicando:",
             erro
+        )
+
+        telegram(
+            "sendMessage",
+            {
+                "chat_id":
+                    chat_id,
+
+                "text":
+                    (
+                        "❌ Erro ao publicar. "
+                        "Veja os Logs do Render."
+                    )
+            }
         )
 
         return
 
     if resposta.status_code == 200:
 
-        aguardando_afiliado.pop(
+        aguardando_link.pop(
             chat_id,
             None
         )
 
-        telegram_api(
+        telegram(
             "sendMessage",
             {
                 "chat_id":
                     chat_id,
 
                 "text":
-                    (
-                        "🚀 PUBLICADO!\n\n"
-                        "A oferta foi publicada "
-                        "no canal."
-                    )
+                    "🚀 Publicado no canal!"
             }
         )
 
     else:
 
         print(
-            "Telegram respondeu:",
+            "Erro Telegram:",
             resposta.text
         )
 
-        telegram_api(
+        telegram(
             "sendMessage",
             {
                 "chat_id":
@@ -2280,9 +1135,9 @@ def processar_mensagem(
 
                 "text":
                     (
-                        "❌ Não consegui publicar "
-                        "a oferta no canal.\n\n"
-                        f"Telegram HTTP "
+                        "❌ Telegram recusou "
+                        "a publicação.\n\n"
+                        f"HTTP: "
                         f"{resposta.status_code}"
                     )
             }
@@ -2297,110 +1152,41 @@ def processar_mensagem(
 def home():
 
     return """
-    <html>
+    <h1>🔥 Bot Mercado Livre</h1>
 
-    <head>
-        <title>Bot de Ofertas</title>
-    </head>
+    <p>
+        <a href="/buscar-ofertas">
+            🔎 BUSCAR OFERTAS
+        </a>
+    </p>
 
-    <body>
-
-        <h1>🔥 Bot de Ofertas</h1>
-
-        <p>
-            <a href="/buscar-ofertas">
-                🔎 Buscar ofertas
-            </a>
-        </p>
-
-        <p>
-            <a href="/configurar-webhook">
-                ⚙️ Configurar webhook
-            </a>
-        </p>
-
-        <hr>
-
-        <p>
-            Mercado Livre →
-            Aprovação →
-            Link afiliado →
-            Canal
-        </p>
-
-    </body>
-
-    </html>
+    <p>
+        <a href="/configurar-webhook">
+            ⚙️ CONFIGURAR WEBHOOK
+        </a>
+    </p>
     """
 
 
 # =========================================================
-# BUSCAR OFERTAS
+# BUSCAR
 # =========================================================
 
 @app.route(
     "/buscar-ofertas"
 )
-def rota_buscar_ofertas():
+def buscar():
 
     configurar_webhook()
 
-    ofertas, status = buscar_ofertas()
-
-    if status != "200":
-
-        return f"""
-        <h2>❌ Busca falhou</h2>
-
-        <p>
-            Status:
-            <b>{status}</b>
-        </p>
-        """
-
-    if not ofertas:
-
-        return """
-        <h2>
-            ❌ Nenhuma oferta válida encontrada.
-        </h2>
-        """
-
-    enviadas = 0
-
-    # Apenas 3 por rodada
-    for oferta in ofertas[:3]:
-
-        try:
-
-            resposta = (
-                enviar_oferta_para_aprovacao(
-                    oferta
-                )
-            )
-
-            if resposta.status_code == 200:
-
-                enviadas += 1
-
-        except Exception as erro:
-
-            print(
-                "Erro oferta:",
-                erro
-            )
+    quantidade = executar_busca()
 
     return f"""
-    <h2>🔥 OFERTAS ENCONTRADAS!</h2>
+    <h1>🔥 Busca concluída!</h1>
 
     <p>
-        Ofertas analisadas:
-        <b>{len(ofertas)}</b>
-    </p>
-
-    <p>
-        Enviadas para aprovação:
-        <b>{enviadas}</b>
+        Ofertas enviadas para aprovação:
+        <b>{quantidade}</b>
     </p>
 
     <p>
@@ -2417,7 +1203,7 @@ def rota_buscar_ofertas():
     "/telegram/webhook",
     methods=["POST"]
 )
-def telegram_webhook():
+def webhook():
 
     try:
 
@@ -2431,7 +1217,7 @@ def telegram_webhook():
 
         if callback:
 
-            responder_callback(
+            callback_telegram(
                 callback
             )
 
@@ -2441,14 +1227,14 @@ def telegram_webhook():
 
         if message:
 
-            processar_mensagem(
+            mensagem_telegram(
                 message
             )
 
     except Exception as erro:
 
         print(
-            "Erro webhook:",
+            "ERRO WEBHOOK:",
             erro
         )
 
@@ -2462,28 +1248,47 @@ def telegram_webhook():
 @app.route(
     "/configurar-webhook"
 )
-def rota_webhook():
+def configurar():
 
-    sucesso = configurar_webhook()
+    if not BOT_TOKEN:
 
-    if sucesso:
+        return (
+            "❌ TELEGRAM_BOT_TOKEN "
+            "não configurado."
+        )
 
-        return """
-        <h2>✅ Webhook configurado!</h2>
+    try:
 
-        <p>
-            Botões de aprovação ativos.
-        </p>
-        """
+        resposta = telegram(
+            "setWebhook",
+            {
+                "url":
+                    WEBHOOK_URL
+            }
+        )
 
-    return """
-    <h2>❌ Falha no webhook</h2>
+        print(
+            "WEBHOOK:",
+            resposta.text
+        )
 
-    <p>
-        Confira o TELEGRAM_BOT_TOKEN
-        no Render.
-    </p>
-    """
+        if resposta.status_code == 200:
+
+            return """
+            <h1>✅ Webhook configurado!</h1>
+            """
+
+        return (
+            "<h1>❌ Erro webhook</h1>"
+            f"<pre>{resposta.text}</pre>"
+        )
+
+    except Exception as erro:
+
+        return (
+            "<h1>❌ Erro</h1>"
+            f"<pre>{erro}</pre>"
+        )
 
 
 # =========================================================
@@ -2492,7 +1297,7 @@ def rota_webhook():
 
 if __name__ == "__main__":
 
-    port = int(
+    porta = int(
         os.environ.get(
             "PORT",
             5000
@@ -2501,5 +1306,5 @@ if __name__ == "__main__":
 
     app.run(
         host="0.0.0.0",
-        port=port
+        port=porta
     )
