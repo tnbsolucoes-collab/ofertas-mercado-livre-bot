@@ -53,9 +53,19 @@ def oauth_callback():
     response = requests.post(token_url, data=data)
 
     if response.status_code != 200:
-        return f"Erro ao obter autorizacao: {response.text}"
+    return f"Erro ao obter autorizacao: {response.text}"
 
-    return "Mercado Livre conectado com sucesso!"
+token_data = response.json()
+
+access_token = token_data.get("access_token")
+refresh_token = token_data.get("refresh_token")
+user_id = token_data.get("user_id")
+
+print("Access token recebido:", bool(access_token))
+print("Refresh token recebido:", bool(refresh_token))
+print("User ID recebido:", user_id)
+
+return "Mercado Livre conectado com sucesso!"
 
 
 if __name__ == "__main__":
