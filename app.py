@@ -1,573 +1,964 @@
-from flask import Flask, request, redirect
+
 import os
-import json
-import time
-from urllib.parse import urlencode
 import requests
 
 app = Flask(__name__)
 
-# =========================
-# CONFIGURAÇÕES
-# =========================
-ML_CLIENT_ID = os.getenv("ML_CLIENT_ID", "").strip()
-ML_CLIENT_SECRET = os.getenv("ML_CLIENT_SECRET", "").strip()
-ML_ACCESS_TOKEN = os.getenv("ML_ACCESS_TOKEN", "").strip() or None
-ML_REFRESH_TOKEN = os.getenv("ML_REFRESH_TOKEN", "").strip() or None
-
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
-# Chat privado onde você aprova/descarta as ofertas
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
-# Canal público onde o produto aprovado será publicado
-TELEGRAM_CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID", "").strip()
+CLIENT_ID = os.environ.get("ML_CLIENT_ID", "").strip()
+CLIENT_SECRET = os.environ.get("ML_CLIENT_SECRET", "").strip()
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
 
 BASE_URL = "https://ofertas-mercado-livre-bot.onrender.com"
 REDIRECT_URI = f"{BASE_URL}/oauth/callback"
 WEBHOOK_URL = f"{BASE_URL}/telegram/webhook"
-TOKEN_FILE = "ml_tokens.json"
 
-TOKEN_EXPIRES_AT = 0
+ML_ACCESS_TOKEN = None
+ML_REFRESH_TOKEN = None
+
 OFERTAS = {}
 AGUARDANDO_LINK = {}
 
-TERMOS = [
-    "smartphone", "notebook", "fone bluetooth", "smart tv",
-    "mochila", "creatina", "monitor", "teclado", "mouse",
-    "air fryer", "perfume", "tenis", "caixa de som"
+TERMOS_CATEGORIAS = [
+    "smartphone",
+    "fone bluetooth",
+    "smart tv",
+    "notebook",
+    "tenis",
+    "perfume",
+    "air fryer",
+    "relogio",
+    "caixa de som",
+    "aspirador"
 ]
 
 
-def fmt_preco(valor):
-    if valor is None:
-        return "Consulte"
-    try:
-        valor = float(valor)
-    except (TypeError, ValueError):
-        return str(valor)
-    return f"R$ {valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+def telegram_api(metodo, payload):
+    url = (
+        f"https://api.telegram.org/"
+        f"bot{TELEGRAM_BOT_TOKEN}/{metodo}"
+    )
 
-
-def desconto(preco, original):
-    try:
-        preco = float(preco)
-        original = float(original)
-        if original <= 0 or original <= preco:
-            return None
-        return round((original - preco) / original * 100)
-    except (TypeError, ValueError, ZeroDivisionError):
-        return None
-
-
-def tg(method, payload):
-    if not TELEGRAM_BOT_TOKEN:
-        raise RuntimeError("TELEGRAM_BOT_TOKEN não configurado")
     return requests.post(
-        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/{method}",
+        url,
         json=payload,
-        timeout=30,
+        timeout=20
     )
 
 
-# =========================
-# TOKEN MERCADO LIVRE
-# =========================
+def formatar_preco(preco):
+    if preco is None:
+        return "Consulte o preco"
 
-def save_tokens(data):
-    global ML_ACCESS_TOKEN, ML_REFRESH_TOKEN, TOKEN_EXPIRES_AT
-    ML_ACCESS_TOKEN = data.get("access_token") or ML_ACCESS_TOKEN
-    ML_REFRESH_TOKEN = data.get("refresh_token") or ML_REFRESH_TOKEN
-    expires = int(data.get("expires_in") or 21600)
-    TOKEN_EXPIRES_AT = int(time.time()) + expires - 60
     try:
-        with open(TOKEN_FILE, "w", encoding="utf-8") as f:
-            json.dump({
-                "access_token": ML_ACCESS_TOKEN,
-                "refresh_token": ML_REFRESH_TOKEN,
-                "expires_at": TOKEN_EXPIRES_AT,
-            }, f)
-    except Exception as e:
-        print("AVISO: não salvou tokens no arquivo:", e)
+        preco = float(preco)
+    except (TypeError, ValueError):
+        return str(preco)
 
+    texto = f"R$ {preco:,.2f}"
 
-def load_tokens():
-    global ML_ACCESS_TOKEN, ML_REFRESH_TOKEN, TOKEN_EXPIRES_AT
-    try:
-        with open(TOKEN_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        if not ML_ACCESS_TOKEN:
-            ML_ACCESS_TOKEN = data.get("access_token")
-        if not ML_REFRESH_TOKEN:
-            ML_REFRESH_TOKEN = data.get("refresh_token")
-        TOKEN_EXPIRES_AT = int(data.get("expires_at") or 0)
-    except Exception:
-        pass
+    return (
+        texto
+        .replace(",", "X")
+        .replace(".", ",")
+        .replace("X", ".")
+    )
 
-
-def refresh_token():
-    global ML_ACCESS_TOKEN, ML_REFRESH_TOKEN
-    if not ML_REFRESH_TOKEN or not ML_CLIENT_ID or not ML_CLIENT_SECRET:
-        return False
-    try:
-        r = requests.post(
-            "https://api.mercadolibre.com/oauth/token",
-            data={
-                "grant_type": "refresh_token",
-                "client_id": ML_CLIENT_ID,
-                "client_secret": ML_CLIENT_SECRET,
-                "refresh_token": ML_REFRESH_TOKEN,
-            },
-            headers={"Accept": "application/json", "Content-Type": "application/x-www-form-urlencoded"},
-            timeout=30,
-        )
-    except requests.RequestException as e:
-        print("ERRO refresh:", e)
-        return False
-    print("REFRESH STATUS:", r.status_code)
-    if r.status_code != 200:
-        print("REFRESH ERRO:", r.text)
-        return False
-    try:
-        save_tokens(r.json())
-        return bool(ML_ACCESS_TOKEN)
-    except Exception:
-        return False
-
-
-def get_token():
-    load_tokens()
-    if ML_ACCESS_TOKEN and (not TOKEN_EXPIRES_AT or time.time() < TOKEN_EXPIRES_AT):
-        return ML_ACCESS_TOKEN
-    if refresh_token():
-        return ML_ACCESS_TOKEN
-    return None
-
-
-def ml_headers():
-    token = get_token()
-    if not token:
-        return None
-    return {"Authorization": f"Bearer {token}", "Accept": "application/json"}
-
-
-# =========================
-# PÁGINA / OAUTH
-# =========================
 
 @app.route("/")
 def home():
     return """
-    <h2>🔥 Bot Ofertas Mercado Livre BR</h2>
-    <p><a href="/login">1 - Conectar Mercado Livre</a></p>
-    <p><a href="/buscar-mais-vendidos">2 - Buscar oferta</a></p>
-    <p><a href="/configurar-webhook">3 - Configurar webhook Telegram</a></p>
-    <p><a href="/status">4 - Status</a></p>
+    <h2>Bot Ofertas Mercado Livre BR 🤖</h2>
+
+    <p>
+        <a href="/login">
+            1 - Conectar Mercado Livre
+        </a>
+    </p>
+
+    <p>
+        <a href="/buscar-mais-vendidos">
+            2 - Buscar mais vendidos 🔥
+        </a>
+    </p>
+
+    <p>
+        <a href="/configurar-webhook">
+            3 - Configurar Webhook
+        </a>
+    </p>
     """
 
-
-@app.route("/status")
-def status():
-    return {
-        "mercado_livre": bool(get_token()),
-        "telegram": bool(TELEGRAM_BOT_TOKEN),
-        "chat_aprovacao": bool(TELEGRAM_CHAT_ID),
-        "canal": bool(TELEGRAM_CHANNEL_ID),
-        "redirect_uri": REDIRECT_URI,
-    }
-
-
-@app.route("/login")
-def login():
-    if not ML_CLIENT_ID:
-        return "ML_CLIENT_ID não configurado no Render.", 500
-    url = "https://auth.mercadolivre.com.br/authorization?" + urlencode({
-        "response_type": "code",
-        "client_id": ML_CLIENT_ID,
-        "redirect_uri": REDIRECT_URI,
-    })
-    return redirect(url)
-
-
-@app.route("/oauth/callback")
-def oauth_callback():
-    code = request.args.get("code")
-    error = request.args.get("error")
-    error_description = request.args.get("error_description", "")
-
-    if error:
-        return f"<h2>❌ Mercado Livre recusou</h2><p>{error}</p><p>{error_description}</p>", 400
-
-    if not code:
-        return "Nenhum code recebido do Mercado Livre.", 400
-
-    if not ML_CLIENT_ID or not ML_CLIENT_SECRET:
-        return "ML_CLIENT_ID ou ML_CLIENT_SECRET não configurado.", 500
-
-    try:
-        r = requests.post(
-            "https://api.mercadolibre.com/oauth/token",
-            data={
-                "grant_type": "authorization_code",
-                "client_id": ML_CLIENT_ID,
-                "client_secret": ML_CLIENT_SECRET,
-                "code": code,
-                "redirect_uri": REDIRECT_URI,
-            },
-            headers={"Accept": "application/json", "Content-Type": "application/x-www-form-urlencoded"},
-            timeout=30,
-        )
-    except requests.RequestException as e:
-        return f"Erro de conexão: {e}", 500
-
-    print("OAUTH STATUS:", r.status_code)
-    print("OAUTH RESPOSTA:", r.text)
-
-    if r.status_code != 200:
-        return f"<h2>❌ Erro ao obter token</h2><pre>{r.text}</pre>", r.status_code
-
-    try:
-        data = r.json()
-    except ValueError:
-        return "Resposta inválida do Mercado Livre.", 500
-
-    save_tokens(data)
-    return "<h2>🔥 Mercado Livre conectado!</h2><p><a href='/buscar-mais-vendidos'>Buscar oferta agora</a></p>"
-
-
-# =========================
-# TELEGRAM WEBHOOK
-# =========================
 
 @app.route("/configurar-webhook")
 def configurar_webhook():
     if not TELEGRAM_BOT_TOKEN:
-        return "TELEGRAM_BOT_TOKEN não configurado.", 500
+        return "Token do Telegram nao configurado."
+
     try:
-        r = tg("setWebhook", {
-            "url": WEBHOOK_URL,
-            "allowed_updates": ["callback_query", "message"],
-        })
-        data = r.json()
-    except Exception as e:
-        return f"Erro: {e}", 500
-    return f"<pre>{json.dumps(data, ensure_ascii=False, indent=2)}</pre>"
-
-
-# =========================
-# MERCADO LIVRE - PREÇO/ITEM
-# =========================
-
-def get_prices(item_id, headers):
-    """Usa /items/{id}/prices para obter o preço promocional atual."""
-    try:
-        r = requests.get(
-            f"https://api.mercadolibre.com/items/{item_id}/prices",
-            headers=headers,
-            timeout=30,
+        resposta = telegram_api(
+            "setWebhook",
+            {
+                "url": WEBHOOK_URL,
+                "allowed_updates": [
+                    "callback_query",
+                    "message"
+                ]
+            }
         )
-    except requests.RequestException as e:
-        print("ERRO /prices:", e)
-        return None, None
 
-    if r.status_code != 200:
-        print("ERRO /prices", item_id, r.status_code, r.text[:500])
-        return None, None
+        dados = resposta.json()
+
+    except Exception:
+        return "Erro ao configurar webhook."
+
+    if not dados.get("ok"):
+        return "Telegram nao aceitou o webhook."
+
+    return """
+    <h2>WEBHOOK CONFIGURADO! ✅</h2>
+    <p>Telegram conectado ao bot.</p>
+    """
+
+
+@app.route("/login")
+def login():
+    auth_url = (
+        "https://auth.mercadolivre.com.br/authorization"
+        "?response_type=code"
+        f"&client_id={CLIENT_ID}"
+        f"&redirect_uri={REDIRECT_URI}"
+    )
+
+    return redirect(auth_url)
+
+
+@app.route("/oauth/callback")
+def oauth_callback():
+    global ML_ACCESS_TOKEN, ML_REFRESH_TOKEN
+
+    code = request.args.get("code")
+
+    if not code:
+        return "Nenhum codigo recebido."
 
     try:
-        prices = (r.json() or {}).get("prices") or []
-    except ValueError:
-        return None, None
+        resposta = requests.post(
+            "https://api.mercadolibre.com/oauth/token",
+            data={
+                "grant_type": "authorization_code",
+                "client_id": CLIENT_ID,
+                "client_secret": CLIENT_SECRET,
+                "code": code,
+                "redirect_uri": REDIRECT_URI
+            },
+            timeout=20
+        )
 
-    promotions = []
-    standards = []
+    except requests.RequestException:
+        return "Erro de conexao com Mercado Livre."
 
-    for p in prices:
-        try:
-            amount = float(p.get("amount"))
-        except (TypeError, ValueError):
-            continue
-        regular = p.get("regular_amount")
-        try:
-            regular = float(regular) if regular is not None else None
-        except (TypeError, ValueError):
-            regular = None
-        kind = str(p.get("type", "")).lower()
+    if resposta.status_code != 200:
+        return (
+            "Erro ao conectar Mercado Livre. "
+            f"Codigo: {resposta.status_code}"
+        )
 
-        if kind == "promotion" and regular is not None and regular > amount:
-            promotions.append((amount, regular))
-        elif kind == "standard":
-            standards.append((amount, None))
+    dados = resposta.json()
 
-    # Se existir promoção válida, ela vence.
-    if promotions:
-        promotions.sort(key=lambda x: x[0])
-        return promotions[0]
-    if standards:
-        standards.sort(key=lambda x: x[0])
-        return standards[0]
-    return None, None
+    ML_ACCESS_TOKEN = dados.get("access_token")
+    ML_REFRESH_TOKEN = dados.get("refresh_token")
+
+    print(
+        "OAUTH TOKEN RECEBIDO. "
+        f"expires_in={dados.get('expires_in')} "
+        f"user_id={dados.get('user_id')}"
+    )
+
+    if not ML_ACCESS_TOKEN:
+        return "Access token nao recebido."
+
+    return """
+    <h2>Mercado Livre conectado! ✅</h2>
+
+    <p>
+        <a href="/buscar-mais-vendidos">
+            Buscar mais vendidos 🔥
+        </a>
+    </p>
+    """
 
 
-def get_item(item_id, headers):
+def descobrir_categoria(termo, headers):
     try:
-        r = requests.get(
+        resposta = requests.get(
+            (
+                "https://api.mercadolibre.com/"
+                "sites/MLB/domain_discovery/search"
+            ),
+            headers=headers,
+            params={
+                "q": termo,
+                "limit": 1
+            },
+            timeout=20
+        )
+
+    except requests.RequestException:
+        return None
+
+    if resposta.status_code != 200:
+        return None
+
+    resultados = resposta.json()
+
+    if not resultados:
+        return None
+
+    return resultados[0].get("category_id")
+
+
+def consultar_ranking(category_id, headers):
+    try:
+        resposta = requests.get(
+            (
+                "https://api.mercadolibre.com/"
+                f"highlights/MLB/category/{category_id}"
+            ),
+            headers=headers,
+            timeout=20
+        )
+
+    except requests.RequestException:
+        return []
+
+    if resposta.status_code != 200:
+        return []
+
+    dados = resposta.json()
+
+    return dados.get("content") or []
+
+
+def consultar_item(item_id, headers):
+    try:
+        resposta = requests.get(
             f"https://api.mercadolibre.com/items/{item_id}",
             headers=headers,
-            timeout=30,
+            timeout=20
         )
-    except requests.RequestException as e:
-        print("ERRO item:", e)
+
+    except requests.RequestException:
         return None
 
-    if r.status_code != 200:
-        print("ERRO item", item_id, r.status_code, r.text[:500])
+    if resposta.status_code != 200:
+        return None
+
+    item = resposta.json()
+
+    if item.get("status") != "active":
+        return None
+
+    permalink = item.get("permalink")
+
+    if not permalink:
+        return None
+
+    titulo = item.get("title") or "Produto"
+
+    preco = item.get("price")
+
+    original_price = item.get("original_price")
+
+    imagem = (
+        item.get("secure_thumbnail")
+        or item.get("thumbnail")
+    )
+
+    pictures = item.get("pictures") or []
+
+    if pictures:
+        imagem = (
+            pictures[0].get("secure_url")
+            or pictures[0].get("url")
+            or imagem
+        )
+
+    return {
+        "item_id": str(item_id),
+        "nome": titulo,
+        "preco_numero": preco,
+        "preco": formatar_preco(preco),
+        "preco_original": original_price,
+        "imagem": imagem,
+        "link_normal": permalink
+    }
+
+
+def converter_product(product_id, headers):
+    try:
+        resposta = requests.get(
+            (
+                "https://api.mercadolibre.com/"
+                f"products/{product_id}"
+            ),
+            headers=headers,
+            timeout=20
+        )
+
+    except requests.RequestException:
+        return None
+
+    if resposta.status_code != 200:
+        return None
+
+    produto = resposta.json()
+
+    if produto.get("status") != "active":
+        return None
+
+    vencedor = produto.get("buy_box_winner") or {}
+
+    item_id = vencedor.get("item_id")
+
+    if not item_id:
+        return None
+
+    oferta = consultar_item(
+        item_id,
+        headers
+    )
+
+    if not oferta:
+        return None
+
+    # O vencedor do catalogo pode trazer
+    # preco/original_price mais atualizados.
+    preco = vencedor.get("price")
+
+    if preco is not None:
+        oferta["preco_numero"] = preco
+        oferta["preco"] = formatar_preco(preco)
+
+    original_price = vencedor.get("original_price")
+
+    if original_price is not None:
+        oferta["preco_original"] = original_price
+
+    oferta["product_id"] = str(product_id)
+
+    return oferta
+
+
+def calcular_desconto(preco, original_price):
+    try:
+        preco = float(preco)
+        original_price = float(original_price)
+
+        if original_price <= preco:
+            return None
+
+        desconto = (
+            (original_price - preco)
+            / original_price
+        ) * 100
+
+        return round(desconto)
+
+    except (TypeError, ValueError, ZeroDivisionError):
+        return None
+
+
+def consultar_item_publico(item_id):
+    """Consulta um item publico sem Authorization."""
+    try:
+        resposta = requests.get(
+            f"https://api.mercadolibre.com/items/{item_id}",
+            timeout=20,
+        )
+    except requests.RequestException as erro:
+        print(f"ERRO item {item_id}: {erro}")
+        return None
+
+    print(f"ITEM PUBLICO {item_id}: {resposta.status_code}")
+
+    if resposta.status_code != 200:
+        print(
+            f"ERRO item {item_id} {resposta.status_code} "
+            f"{resposta.text[:300]}"
+        )
         return None
 
     try:
-        item = r.json()
+        item = resposta.json()
     except ValueError:
         return None
 
     if item.get("status") != "active":
         return None
 
-    title = item.get("title") or "Produto"
     permalink = item.get("permalink")
-    if not permalink:
+    preco = item.get("price")
+    if not permalink or preco is None:
         return None
 
-    image = item.get("secure_thumbnail") or item.get("thumbnail")
+    imagem = (
+        item.get("secure_thumbnail")
+        or item.get("thumbnail")
+    )
+
     pictures = item.get("pictures") or []
     if pictures:
-        image = pictures[0].get("secure_url") or pictures[0].get("url") or image
-
-    price = item.get("price")
-    original = item.get("original_price")
-
-    # Corrige preço promocional usando o endpoint oficial /prices.
-    current, regular = get_prices(str(item_id), headers)
-    if current is not None:
-        price = current
-    if regular is not None:
-        original = regular
+        imagem = (
+            pictures[0].get("secure_url")
+            or pictures[0].get("url")
+            or imagem
+        )
 
     return {
         "item_id": str(item_id),
-        "nome": title,
-        "preco_numero": price,
-        "preco": fmt_preco(price),
-        "preco_original": original,
-        "desconto": desconto(price, original),
-        "imagem": image,
+        "nome": item.get("title") or "Produto",
+        "preco_numero": preco,
+        "preco": formatar_preco(preco),
+        "preco_original": item.get("original_price"),
+        "imagem": imagem,
         "link_normal": permalink,
     }
 
 
-# =========================
-# BUSCA DE OFERTAS
-# =========================
+def buscar_oferta_publica():
+    """
+    Busca ofertas pela busca publica do Mercado Livre.
+    Nao envia o access token nessas consultas, evitando o
+    403 PolicyAgent visto nos logs.
+    """
+    termos = [
+        "smartphone",
+        "fone bluetooth",
+        "smart tv",
+        "notebook",
+        "tenis",
+        "perfume",
+        "air fryer",
+        "relogio",
+        "caixa de som",
+        "aspirador",
+        "mochila",
+        "creatina",
+        "teclado",
+        "mouse",
+    ]
 
-def buscar_itens(termo, headers):
-    """Fallback robusto: usa busca de itens caso o endpoint de highlights dê 403."""
-    try:
-        r = requests.get(
-            "https://api.mercadolibre.com/sites/MLB/search",
-            params={"q": termo, "limit": 20},
-            headers=headers,
-            timeout=30,
+    for termo in termos:
+        try:
+            resposta = requests.get(
+                "https://api.mercadolibre.com/sites/MLB/search",
+                params={
+                    "q": termo,
+                    "limit": 50,
+                    "sort": "relevance",
+                },
+                timeout=20,
+            )
+        except requests.RequestException as erro:
+            print(f"ERRO busca publica {termo}: {erro}")
+            continue
+
+        print(
+            f"BUSCA PUBLICA {termo}: "
+            f"{resposta.status_code}"
         )
-    except requests.RequestException as e:
-        print("ERRO busca:", e)
-        return []
 
-    if r.status_code != 200:
-        print("ERRO busca", termo, r.status_code, r.text[:500])
-        return []
+        if resposta.status_code != 200:
+            print(
+                f"ERRO busca {termo} {resposta.status_code} "
+                f"{resposta.text[:500]}"
+            )
+            continue
 
-    try:
-        return (r.json() or {}).get("results") or []
-    except ValueError:
-        return []
+        try:
+            dados = resposta.json()
+        except ValueError:
+            continue
 
+        resultados = dados.get("results") or []
 
-def encontrar_oferta(headers):
-    candidatos = []
-
-    for termo in TERMOS:
-        resultados = buscar_itens(termo, headers)
-        for result in resultados:
-            item_id = result.get("id")
+        # Primeiro procura uma oferta com desconto real.
+        for resultado in resultados:
+            item_id = resultado.get("id")
             if not item_id:
                 continue
-            oferta = get_item(item_id, headers)
+
+            oferta = consultar_item_publico(item_id)
             if not oferta:
                 continue
-            candidatos.append(oferta)
 
-        # Prioriza logo que encontra desconto real.
-        com_desconto = [x for x in candidatos if x.get("desconto")]
-        if com_desconto:
-            com_desconto.sort(key=lambda x: x.get("desconto") or 0, reverse=True)
-            return com_desconto[0]
+            desconto = calcular_desconto(
+                oferta.get("preco_numero"),
+                oferta.get("preco_original"),
+            )
 
-    if candidatos:
-        return candidatos[0]
+            if desconto and desconto >= 5:
+                oferta["desconto"] = desconto
+                oferta["categoria_busca"] = termo
+                return oferta
+
+        # Se nao houver desconto, usa o primeiro item valido.
+        for resultado in resultados:
+            item_id = resultado.get("id")
+            if not item_id:
+                continue
+
+            oferta = consultar_item_publico(item_id)
+            if oferta:
+                oferta["desconto"] = calcular_desconto(
+                    oferta.get("preco_numero"),
+                    oferta.get("preco_original"),
+                )
+                oferta["categoria_busca"] = termo
+                return oferta
+
     return None
+
+
+@app.route("/status")
+def status():
+    return {
+        "mercado_livre_conectado": bool(ML_ACCESS_TOKEN),
+        "client_id_configurado": bool(CLIENT_ID),
+        "client_secret_configurado": bool(CLIENT_SECRET),
+        "telegram_configurado": bool(TELEGRAM_BOT_TOKEN),
+        "telegram_chat_configurado": bool(TELEGRAM_CHAT_ID),
+        "redirect_uri": REDIRECT_URI,
+    }
 
 
 @app.route("/buscar-mais-vendidos")
 def buscar_mais_vendidos():
-    headers = ml_headers()
-    if not headers:
-        return "<h3>Conecte o Mercado Livre primeiro.</h3><p><a href='/login'>Conectar</a></p>", 401
+    if not ML_ACCESS_TOKEN:
+        return """
+        <h3>Conecte o Mercado Livre primeiro.</h3>
+        <p><a href="/login">Conectar Mercado Livre</a></p>
+        """
 
-    oferta = encontrar_oferta(headers)
+    headers = {
+        "Authorization": f"Bearer {ML_ACCESS_TOKEN}"
+    }
+
+    oferta = buscar_oferta_publica()
+
     if not oferta:
-        return "<h3>Não encontrei ofertas agora.</h3><p>Veja os logs do Render para o erro da API.</p>", 404
+        return """
+        <h3>
+            Nao encontrei uma publicacao compravel
+            nos rankings testados.
+        </h3>
+
+        <p>
+            ITEM e PRODUCT foram testados.
+            USER_PRODUCT ainda nao esta habilitado.
+        </p>
+        """
 
     item_id = oferta["item_id"]
+
     OFERTAS[item_id] = oferta
 
-    legenda = f"🔥 OFERTA ENCONTRADA!\n\n📦 {oferta['nome']}\n\n"
-    if oferta.get("desconto") and oferta.get("preco_original"):
+    nome = oferta["nome"]
+    preco = oferta["preco"]
+    imagem = oferta["imagem"]
+    link_normal = oferta["link_normal"]
+    posicao = oferta.get("posicao", "?")
+    desconto = oferta.get("desconto")
+    categoria = oferta.get(
+        "categoria_busca",
+        ""
+    )
+
+    legenda = (
+        "🔥 MAIS VENDIDO ENCONTRADO!\n\n"
+        f"🏆 Ranking: #{posicao}\n"
+        f"📂 Categoria: {categoria}\n\n"
+        f"📦 {nome}\n\n"
+    )
+
+    if desconto:
         legenda += (
-            f"🔥 Por: {oferta['preco']}\n"
-            f"💵 De: {fmt_preco(oferta['preco_original'])}\n"
-            f"📉 {oferta['desconto']}% OFF\n\n"
+            f"🏷️ DESCONTO: {desconto}% OFF\n"
         )
+
+        original = formatar_preco(
+            oferta.get("preco_original")
+        )
+
+        legenda += (
+            f"❌ De: {original}\n"
+            f"✅ Por: {preco}\n\n"
+        )
+
     else:
-        legenda += f"💰 Preço: {oferta['preco']}\n\n"
-    legenda += f"🔗 Link normal:\n{oferta['link_normal']}\n\n⚠️ Confira o produto antes de publicar."
+        legenda += (
+            f"💰 Preco: {preco}\n\n"
+        )
 
-    buttons = {"inline_keyboard": [[
-        {"text": "✅ APROVAR", "callback_data": f"publicar:{item_id}"},
-        {"text": "❌ DESCARTAR", "callback_data": f"ignorar:{item_id}"},
-    ]]}
+    legenda += (
+        "🔗 LINK DO PRODUTO:\n"
+        f"{link_normal}\n\n"
+        "👇 Deseja preparar essa oferta?"
+    )
 
-    payload = {"chat_id": TELEGRAM_CHAT_ID, "reply_markup": buttons}
-    if oferta.get("imagem"):
-        payload["photo"] = oferta["imagem"]
-        payload["caption"] = legenda
-        r = tg("sendPhoto", payload)
-    else:
-        payload["text"] = legenda
-        r = tg("sendMessage", payload)
+    botoes = {
+        "inline_keyboard": [
+            [
+                {
+                    "text": "✅ PUBLICAR",
+                    "callback_data": (
+                        f"publicar:{item_id}"
+                    )
+                },
+                {
+                    "text": "❌ IGNORAR",
+                    "callback_data": (
+                        f"ignorar:{item_id}"
+                    )
+                }
+            ]
+        ]
+    }
 
-    if r.status_code != 200:
-        return f"Erro Telegram {r.status_code}: {r.text}", 500
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "reply_markup": botoes
+    }
 
-    return "<h3>🔥 Busca concluída!</h3><p>Oferta enviada para aprovação no Telegram.</p>"
+    try:
+        if imagem:
+            payload["photo"] = imagem
+            payload["caption"] = legenda
+
+            telegram = telegram_api(
+                "sendPhoto",
+                payload
+            )
+
+        else:
+            payload["text"] = legenda
+
+            telegram = telegram_api(
+                "sendMessage",
+                payload
+            )
+
+    except requests.RequestException:
+        return "Erro ao conectar com Telegram."
+
+    if telegram.status_code != 200:
+        return (
+            "Erro ao enviar para Telegram. "
+            f"Codigo: {telegram.status_code}"
+        )
+
+    return """
+    <h2>OFERTA ENVIADA! 🔥</h2>
+    <p>
+        Encontrei um produto do ranking
+        com publicacao compravel.
+    </p>
+    <p>Confira seu Telegram.</p>
+    """
 
 
-# =========================
-# TELEGRAM: APROVAR / DESCARTAR / LINK DE AFILIADO
-# =========================
-
-@app.route("/telegram/webhook", methods=["POST"])
+@app.route(
+    "/telegram/webhook",
+    methods=["POST"]
+)
 def telegram_webhook():
-    update = request.get_json(silent=True) or {}
+    update = request.get_json(
+        silent=True
+    ) or {}
 
-    callback = update.get("callback_query")
+    callback = update.get(
+        "callback_query"
+    )
+
     if callback:
         callback_id = callback.get("id")
-        data = callback.get("data", "")
-        message = callback.get("message") or {}
-        chat_id = (message.get("chat") or {}).get("id")
+        callback_data = callback.get(
+            "data",
+            ""
+        )
 
-        if str(chat_id) != str(TELEGRAM_CHAT_ID):
-            tg("answerCallbackQuery", {"callback_query_id": callback_id, "text": "Acesso não autorizado."})
+        mensagem_callback = callback.get(
+            "message",
+            {}
+        )
+
+        chat_id = (
+            mensagem_callback
+            .get("chat", {})
+            .get("id")
+        )
+
+        if str(chat_id) != str(
+            TELEGRAM_CHAT_ID
+        ):
+            if callback_id:
+                telegram_api(
+                    "answerCallbackQuery",
+                    {
+                        "callback_query_id":
+                            callback_id,
+                        "text":
+                            "Acesso nao autorizado."
+                    }
+                )
+
             return "OK", 200
 
-        if data.startswith("ignorar:"):
-            item_id = data.split(":", 1)[1]
-            OFERTAS.pop(item_id, None)
-            AGUARDANDO_LINK.pop(str(chat_id), None)
-            tg("answerCallbackQuery", {"callback_query_id": callback_id, "text": "Oferta descartada ❌"})
+        if callback_data.startswith(
+            "ignorar:"
+        ):
+            item_id = callback_data.split(
+                ":",
+                1
+            )[1]
+
+            OFERTAS.pop(
+                item_id,
+                None
+            )
+
+            if AGUARDANDO_LINK.get(
+                str(chat_id)
+            ) == item_id:
+                AGUARDANDO_LINK.pop(
+                    str(chat_id),
+                    None
+                )
+
+            telegram_api(
+                "answerCallbackQuery",
+                {
+                    "callback_query_id":
+                        callback_id,
+                    "text":
+                        "Oferta ignorada ❌"
+                }
+            )
+
+            telegram_api(
+                "sendMessage",
+                {
+                    "chat_id":
+                        TELEGRAM_CHAT_ID,
+                    "text": (
+                        "❌ Oferta descartada.\n\n"
+                        "Vou deixar essa de fora."
+                    )
+                }
+            )
+
             return "OK", 200
 
-        if data.startswith("publicar:"):
-            item_id = data.split(":", 1)[1]
-            oferta = OFERTAS.get(item_id)
+        if callback_data.startswith(
+            "publicar:"
+        ):
+            item_id = callback_data.split(
+                ":",
+                1
+            )[1]
+
+            oferta = OFERTAS.get(
+                item_id
+            )
+
             if not oferta:
-                tg("answerCallbackQuery", {"callback_query_id": callback_id, "text": "Oferta expirou."})
+                telegram_api(
+                    "answerCallbackQuery",
+                    {
+                        "callback_query_id":
+                            callback_id,
+                        "text":
+                            "Oferta expirou."
+                    }
+                )
+
+                telegram_api(
+                    "sendMessage",
+                    {
+                        "chat_id":
+                            TELEGRAM_CHAT_ID,
+                        "text": (
+                            "⚠️ Essa oferta "
+                            "nao esta mais na memoria.\n\n"
+                            "Busque uma nova."
+                        )
+                    }
+                )
+
                 return "OK", 200
 
-            AGUARDANDO_LINK[str(chat_id)] = item_id
-            tg("answerCallbackQuery", {"callback_query_id": callback_id, "text": "Oferta aprovada! ✅"})
-            tg("sendMessage", {
-                "chat_id": TELEGRAM_CHAT_ID,
-                "text": (
-                    "💰 OFERTA APROVADA!\n\n"
-                    "🔗 COPIE ESTE LINK:\n\n"
-                    f"{oferta['link_normal']}\n\n"
-                    "Gere o seu link de afiliado do Mercado Livre e mande o link aqui no bot. 👇"
-                ),
-            })
+            link_normal = oferta.get(
+                "link_normal",
+                ""
+            )
+
+            if not link_normal:
+                telegram_api(
+                    "answerCallbackQuery",
+                    {
+                        "callback_query_id":
+                            callback_id,
+                        "text":
+                            "Link nao encontrado."
+                    }
+                )
+
+                return "OK", 200
+
+            AGUARDANDO_LINK[
+                str(chat_id)
+            ] = item_id
+
+            telegram_api(
+                "answerCallbackQuery",
+                {
+                    "callback_query_id":
+                        callback_id,
+                    "text":
+                        "Oferta aprovada! ✅"
+                }
+            )
+
+            telegram_api(
+                "sendMessage",
+                {
+                    "chat_id":
+                        TELEGRAM_CHAT_ID,
+                    "text": (
+                        "💰 OFERTA APROVADA!\n\n"
+                        "🔗 COPIE ESTE LINK:\n\n"
+                        f"{link_normal}\n\n"
+                        "Coloque esse link no "
+                        "Gerador de Links do "
+                        "Mercado Livre.\n\n"
+                        "Depois mande aqui para "
+                        "o bot o link de afiliado "
+                        "gerado. 👇"
+                    )
+                }
+            )
+
             return "OK", 200
 
-    message = update.get("message")
-    if message:
-        chat_id = (message.get("chat") or {}).get("id")
-        text = (message.get("text") or "").strip()
+    mensagem = update.get("message")
 
-        if str(chat_id) != str(TELEGRAM_CHAT_ID):
+    if mensagem:
+        chat_id = (
+            mensagem
+            .get("chat", {})
+            .get("id")
+        )
+
+        texto = mensagem.get(
+            "text",
+            ""
+        ).strip()
+
+        if str(chat_id) != str(
+            TELEGRAM_CHAT_ID
+        ):
             return "OK", 200
 
-        item_id = AGUARDANDO_LINK.get(str(chat_id))
+        item_id = AGUARDANDO_LINK.get(
+            str(chat_id)
+        )
+
         if not item_id:
             return "OK", 200
 
-        if not text.startswith(("https://", "http://")):
-            tg("sendMessage", {"chat_id": TELEGRAM_CHAT_ID, "text": "⚠️ Cole o link completo gerado pelo Mercado Livre."})
-            return "OK", 200
-
-        oferta = OFERTAS.get(item_id)
-        if not oferta:
-            AGUARDANDO_LINK.pop(str(chat_id), None)
-            tg("sendMessage", {"chat_id": TELEGRAM_CHAT_ID, "text": "⚠️ Essa oferta expirou. Busque outra."})
-            return "OK", 200
-
-        oferta["link_afiliado"] = text
-        AGUARDANDO_LINK.pop(str(chat_id), None)
-
-        if not TELEGRAM_CHANNEL_ID:
-            tg("sendMessage", {
-                "chat_id": TELEGRAM_CHAT_ID,
-                "text": "✅ Link recebido! Configure TELEGRAM_CHANNEL_ID no Render para eu publicar automaticamente no canal.",
-            })
-            return "OK", 200
-
-        legenda = f"🔥 OFERTA ENCONTRADA!\n\n📦 {oferta['nome']}\n\n"
-        if oferta.get("desconto") and oferta.get("preco_original"):
-            legenda += (
-                f"🔥 Por: {oferta['preco']}\n"
-                f"💵 De: {fmt_preco(oferta['preco_original'])}\n"
-                f"📉 {oferta['desconto']}% OFF\n\n"
+        if not (
+            texto.startswith("https://")
+            or texto.startswith("http://")
+        ):
+            telegram_api(
+                "sendMessage",
+                {
+                    "chat_id":
+                        TELEGRAM_CHAT_ID,
+                    "text": (
+                        "⚠️ Cole o link completo "
+                        "gerado pelo Mercado Livre."
+                    )
+                }
             )
-        else:
-            legenda += f"💰 Preço: {oferta['preco']}\n\n"
-        legenda += f"🛒 COMPRE AQUI:\n{oferta['link_afiliado']}\n\n⚠️ Confira preço e disponibilidade antes da compra."
 
-        if oferta.get("imagem"):
-            pub = tg("sendPhoto", {"chat_id": TELEGRAM_CHANNEL_ID, "photo": oferta["imagem"], "caption": legenda})
-        else:
-            pub = tg("sendMessage", {"chat_id": TELEGRAM_CHANNEL_ID, "text": legenda})
-
-        if pub.status_code != 200:
-            print("ERRO PUBLICAÇÃO:", pub.status_code, pub.text)
-            tg("sendMessage", {
-                "chat_id": TELEGRAM_CHAT_ID,
-                "text": f"❌ Não consegui publicar no canal. HTTP {pub.status_code}\n{pub.text[:1000]}",
-            })
             return "OK", 200
 
-        tg("sendMessage", {"chat_id": TELEGRAM_CHAT_ID, "text": "🚀 PUBLICADO NO CANAL! ✅"})
-        OFERTAS.pop(item_id, None)
+        oferta = OFERTAS.get(
+            item_id
+        )
+
+        if not oferta:
+            AGUARDANDO_LINK.pop(
+                str(chat_id),
+                None
+            )
+
+            telegram_api(
+                "sendMessage",
+                {
+                    "chat_id":
+                        TELEGRAM_CHAT_ID,
+                    "text": (
+                        "⚠️ Essa oferta expirou.\n\n"
+                        "Busque uma nova oferta."
+                    )
+                }
+            )
+
+            return "OK", 200
+
+        # Usa exatamente o link que voce
+        # enviar para o bot.
+        oferta["link_afiliado"] = texto
+
+        AGUARDANDO_LINK.pop(
+            str(chat_id),
+            None
+        )
+
+        telegram_api(
+            "sendMessage",
+            {
+                "chat_id":
+                    TELEGRAM_CHAT_ID,
+                "text": (
+                    "✅ LINK RECEBIDO!\n\n"
+                    f"📦 {oferta['nome']}\n\n"
+                    f"💰 {oferta['preco']}\n\n"
+                    "🔗 Link associado "
+                    "a oferta.\n\n"
+                    "🔒 Ainda NAO publiquei "
+                    "no canal."
+                )
+            }
+        )
+
         return "OK", 200
 
     return "OK", 200
 
 
-load_tokens()
-
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", "5000")))
+    port = int(
+        os.environ.get(
+            "PORT",
+            5000
+        )
+    )
+
+    app.run(
+        host="0.0.0.0",
+        port=port
+    )
