@@ -18,11 +18,19 @@ REDIRECT_URI = f"{BASE_URL}/oauth/callback"
 
 ML_ACCESS_TOKEN = None
 
-TIMEOUT = 5
-TERMO = "smartphone"
+TIMEOUT = 4
+
+# Poucas categorias por execucao para evitar
+# WORKER TIMEOUT no Render.
+TERMOS = [
+    "smartphone",
+    "fone bluetooth",
+    "air fryer",
+    "perfume"
+]
 
 
-def headers_ml():
+def ml_headers():
     return {
         "Authorization": f"Bearer {ML_ACCESS_TOKEN}"
     }
@@ -30,7 +38,7 @@ def headers_ml():
 
 def telegram_api(metodo, payload):
     url = (
-        f"https://api.telegram.org/"
+        "https://api.telegram.org/"
         f"bot{TELEGRAM_BOT_TOKEN}/{metodo}"
     )
 
@@ -42,10 +50,13 @@ def telegram_api(metodo, payload):
 
 
 def formatar_preco(valor):
+    if valor is None:
+        return "Consulte o preco"
+
     try:
         valor = float(valor)
     except (TypeError, ValueError):
-        return "Consulte o preco"
+        return str(valor)
 
     texto = f"R$ {valor:,.2f}"
 
@@ -69,8 +80,8 @@ def home():
     </p>
 
     <p>
-        <a href="/buscar-oferta">
-            2 - Buscar oferta compravel 🔥
+        <a href="/buscar-item-ranking">
+            2 - Cacar anuncio nos mais vendidos 🔥
         </a>
     </p>
     """
@@ -111,11 +122,11 @@ def oauth_callback():
         )
 
     except requests.RequestException:
-        return "Erro ao conectar ao Mercado Livre."
+        return "Erro de conexao com Mercado Livre."
 
     if resposta.status_code != 200:
         return (
-            "Erro OAuth. Codigo HTTP: "
+            "Erro OAuth. HTTP "
             f"{resposta.status_code}"
         )
 
@@ -133,23 +144,23 @@ def oauth_callback():
     <h2>Mercado Livre conectado! ✅</h2>
 
     <p>
-        <a href="/buscar-oferta">
-            Buscar oferta compravel 🔥
+        <a href="/buscar-item-ranking">
+            Cacar anuncio 🔥
         </a>
     </p>
     """
 
 
-def descobrir_categoria():
+def descobrir_categoria(termo):
     try:
         resposta = requests.get(
             (
                 "https://api.mercadolibre.com/"
                 "sites/MLB/domain_discovery/search"
             ),
-            headers=headers_ml(),
+            headers=ml_headers(),
             params={
-                "q": TERMO,
+                "q": termo,
                 "limit": 1
             },
             timeout=TIMEOUT
@@ -172,14 +183,14 @@ def descobrir_categoria():
     return dados[0].get("category_id")
 
 
-def ranking_categoria(category_id):
+def consultar_ranking(category_id):
     try:
         resposta = requests.get(
             (
                 "https://api.mercadolibre.com/"
                 f"highlights/MLB/category/{category_id}"
             ),
-            headers=headers_ml(),
+            headers=ml_headers(),
             timeout=TIMEOUT
         )
 
@@ -194,22 +205,22 @@ def ranking_categoria(category_id):
     except ValueError:
         return []
 
-    ranking = dados.get("content") or []
+    resultados = dados.get("content") or []
 
     return sorted(
-        ranking,
+        resultados,
         key=lambda x: x.get("position", 999)
-    )[:3]
+    )[:10]
 
 
-def consultar_product(product_id):
+def consultar_item(item_id):
     try:
         resposta = requests.get(
             (
                 "https://api.mercadolibre.com/"
-                f"products/{product_id}"
+                f"items/{item_id}"
             ),
-            headers=headers_ml(),
+            headers=ml_headers(),
             timeout=TIMEOUT
         )
 
@@ -220,69 +231,111 @@ def consultar_product(product_id):
         return None
 
     try:
-        return resposta.json()
+        item = resposta.json()
     except ValueError:
         return None
 
+    if item.get("status") != "active":
+        return None
 
-def procurar_anuncios(nome):
-    """
-    Tenta a busca publica do site para obter
-    anuncios compraveis relacionados ao nome.
+    permalink = item.get("permalink")
 
-    Se o Mercado Livre bloquear essa busca,
-    devolvemos o codigo HTTP para diagnostico,
-    em vez de ficar fazendo varias chamadas.
-    """
+    if not permalink:
+        return None
 
-    try:
-        resposta = requests.get(
-            "https://api.mercadolibre.com/sites/MLB/search",
-            params={
-                "q": nome,
-                "limit": 5
-            },
-            timeout=TIMEOUT
+    pictures = item.get("pictures") or []
+
+    imagem = (
+        item.get("secure_thumbnail")
+        or item.get("thumbnail")
+        or ""
+    )
+
+    if pictures:
+        primeira = pictures[0]
+
+        if isinstance(primeira, dict):
+            imagem = (
+                primeira.get("secure_url")
+                or primeira.get("url")
+                or imagem
+            )
+
+    return {
+        "id": str(item_id),
+        "titulo": item.get("title") or "Produto",
+        "preco": item.get("price"),
+        "preco_original": item.get("original_price"),
+        "link": permalink,
+        "imagem": imagem
+    }
+
+
+def encontrar_item_ranking():
+    relatorio = []
+
+    for termo in TERMOS:
+        categoria = descobrir_categoria(termo)
+
+        if not categoria:
+            relatorio.append(
+                f"{termo}: categoria nao encontrada"
+            )
+            continue
+
+        ranking = consultar_ranking(categoria)
+
+        if not ranking:
+            relatorio.append(
+                f"{termo}: ranking vazio"
+            )
+            continue
+
+        tipos = []
+
+        for resultado in ranking:
+            tipo = str(
+                resultado.get("type", "")
+            ).upper()
+
+            tipos.append(tipo)
+
+            if tipo != "ITEM":
+                continue
+
+            item_id = resultado.get("id")
+
+            if not item_id:
+                continue
+
+            item = consultar_item(item_id)
+
+            if not item:
+                continue
+
+            item["posicao"] = resultado.get(
+                "position",
+                "?"
+            )
+
+            item["termo"] = termo
+            item["categoria"] = categoria
+
+            return item, relatorio
+
+        resumo = ", ".join(
+            sorted(set(tipos))
         )
 
-    except requests.RequestException:
-        return [], "ERRO_CONEXAO"
+        relatorio.append(
+            f"{termo}: {resumo}"
+        )
 
-    if resposta.status_code != 200:
-        return [], str(resposta.status_code)
-
-    try:
-        dados = resposta.json()
-    except ValueError:
-        return [], "JSON_INVALIDO"
-
-    return dados.get("results") or [], "200"
+    return None, relatorio
 
 
-def escolher_anuncio(anuncios, product_id):
-    """
-    Prioriza anuncio cujo catalog_product_id
-    seja exatamente o PRODUCT do ranking.
-    """
-
-    for anuncio in anuncios:
-        if (
-            str(anuncio.get("catalog_product_id"))
-            == str(product_id)
-        ):
-            if (
-                anuncio.get("permalink")
-                and anuncio.get("price") is not None
-            ):
-                return anuncio
-
-    # Se nenhum bateu exatamente, NAO usamos
-    # produto parecido. Isso evita mandar oferta errada.
-    return None
-
-
-@app.route("/buscar-oferta")
-def buscar_oferta():
+@app.route("/buscar-item-ranking")
+def buscar_item_ranking():
     if not ML_ACCESS_TOKEN:
         return """
         <h3>Conecte o Mercado Livre primeiro.</h3>
@@ -294,147 +347,96 @@ def buscar_oferta():
         </p>
         """
 
-    categoria = descobrir_categoria()
+    item, relatorio = encontrar_item_ranking()
 
-    if not categoria:
-        return "Nao consegui descobrir a categoria."
-
-    ranking = ranking_categoria(categoria)
-
-    if not ranking:
-        return "Nao consegui carregar o ranking."
-
-    relatorio = []
-
-    for posicao in ranking:
-        tipo = str(
-            posicao.get("type", "")
-        ).upper()
-
-        product_id = posicao.get("id")
-        ranking_posicao = posicao.get(
-            "position",
-            "?"
-        )
-
-        if tipo != "PRODUCT":
-            continue
-
-        produto = consultar_product(product_id)
-
-        if not produto:
-            continue
-
-        nome = (
-            produto.get("name")
-            or produto.get("family_name")
-        )
-
-        if not nome:
-            continue
-
-        anuncios, http_busca = procurar_anuncios(nome)
-
-        relatorio.append(
-            (
-                ranking_posicao,
-                product_id,
-                http_busca
-            )
-        )
-
-        if http_busca != "200":
-            # Nao insistimos para evitar timeout.
-            break
-
-        anuncio = escolher_anuncio(
-            anuncios,
-            product_id
-        )
-
-        if not anuncio:
-            continue
-
-        titulo = anuncio.get("title") or nome
-        preco = anuncio.get("price")
-        link = anuncio.get("permalink")
-
-        imagem = anuncio.get("thumbnail") or ""
-
-        texto = (
-            "🔥 OFERTA COMPRAVEL ENCONTRADA!\n\n"
-            f"🏆 Ranking: #{ranking_posicao}\n\n"
-            f"📦 {titulo}\n\n"
-            f"💰 {formatar_preco(preco)}\n\n"
-            "🔗 LINK REAL:\n"
-            f"{link}"
-        )
-
-        payload = {
-            "chat_id": TELEGRAM_CHAT_ID
-        }
-
-        try:
-            if imagem:
-                payload["photo"] = imagem
-                payload["caption"] = texto
-
-                resposta_tg = telegram_api(
-                    "sendPhoto",
-                    payload
-                )
-
-            else:
-                payload["text"] = texto
-
-                resposta_tg = telegram_api(
-                    "sendMessage",
-                    payload
-                )
-
-        except requests.RequestException:
-            return "Oferta encontrada, mas Telegram falhou."
-
-        if resposta_tg.status_code != 200:
-            return (
-                "Oferta encontrada, mas Telegram "
-                f"retornou {resposta_tg.status_code}."
-            )
-
-        return """
-        <h2>OFERTA COMPRAVEL ENCONTRADA! 🔥</h2>
-        <p>Confira seu Telegram.</p>
-        """
-
-    if relatorio:
+    if not item:
         linhas = ""
 
-        for pos, pid, status in relatorio:
-            linhas += (
-                f"<p>Ranking #{pos} - "
-                f"{pid} - "
-                f"Busca HTTP: <b>{status}</b></p>"
-            )
+        for linha in relatorio:
+            linhas += f"<p>{linha}</p>"
 
         return f"""
-        <h2>Ranking funcionou ✅</h2>
+        <h2>
+            Busca terminou sem travar ✅
+        </h2>
 
         <p>
-            Mas ainda nao conseguimos obter
-            um anuncio compravel correspondente.
+            Ainda nao apareceu ITEM compravel
+            nos rankings testados.
         </p>
+
+        <h3>Resultado:</h3>
 
         {linhas}
 
         <p>
-            Nenhum produto parecido foi enviado.
+            Nenhum produto errado foi enviado.
         </p>
         """
 
+    titulo = item["titulo"]
+    preco = formatar_preco(item["preco"])
+    link = item["link"]
+    imagem = item["imagem"]
+    posicao = item["posicao"]
+    termo = item["termo"]
+
+    texto = (
+        "🔥 MAIS VENDIDO COM ANUNCIO REAL!\n\n"
+        f"🏆 Ranking: #{posicao}\n"
+        f"📂 Busca: {termo}\n\n"
+        f"📦 {titulo}\n\n"
+        f"💰 {preco}\n\n"
+        "🔗 LINK REAL DO ANUNCIO:\n"
+        f"{link}"
+    )
+
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID
+    }
+
+    try:
+        if imagem:
+            payload["photo"] = imagem
+            payload["caption"] = texto
+
+            telegram = telegram_api(
+                "sendPhoto",
+                payload
+            )
+
+        else:
+            payload["text"] = texto
+
+            telegram = telegram_api(
+                "sendMessage",
+                payload
+            )
+
+    except requests.RequestException:
+        return """
+        <h3>
+            Achei o ITEM, mas o Telegram
+            nao respondeu.
+        </h3>
+        """
+
+    if telegram.status_code != 200:
+        return (
+            "<h3>Achei o ITEM, mas Telegram HTTP "
+            f"{telegram.status_code}</h3>"
+        )
+
     return """
-    <h3>
-        Nenhum PRODUCT valido encontrado.
-    </h3>
+    <h2>ACHAMOS UM ITEM REAL! 🔥🔥🔥</h2>
+
+    <p>
+        Produto enviado para o Telegram.
+    </p>
+
+    <p>
+        O link veio diretamente do anuncio.
+    </p>
     """
 
 
