@@ -15,10 +15,10 @@ WEBHOOK_URL = f"{BASE_URL}/telegram/webhook"
 
 ML_ACCESS_TOKEN = None
 
-# Guarda temporariamente as ofertas encontradas
+# Ofertas encontradas
 OFERTAS = {}
 
-# Guarda qual oferta esta esperando link de afiliado
+# Oferta que esta esperando o link de afiliado
 AGUARDANDO_LINK = {}
 
 
@@ -30,6 +30,39 @@ def telegram_api(metodo, payload):
         json=payload,
         timeout=15
     )
+
+
+def formatar_preco(preco):
+    if preco is None:
+        return "Consulte o preco no Mercado Livre"
+
+    preco_texto = f"R$ {preco:,.2f}"
+
+    return (
+        preco_texto
+        .replace(",", "X")
+        .replace(".", ",")
+        .replace("X", ".")
+    )
+
+
+def montar_link_item(item_id):
+    if not item_id:
+        return ""
+
+    item_id = str(item_id).strip()
+
+    if item_id.startswith("MLB"):
+        numero = item_id.replace("MLB", "", 1)
+    else:
+        numero = item_id
+
+    numero = numero.replace("-", "")
+
+    if not numero:
+        return ""
+
+    return f"https://produto.mercadolivre.com.br/MLB-{numero}"
 
 
 @app.route("/")
@@ -185,7 +218,8 @@ def buscar_produto():
     if busca.status_code != 200:
         return f"Erro na busca. Codigo: {busca.status_code}"
 
-    produtos = busca.json().get("results", [])
+    resultado_busca = busca.json()
+    produtos = resultado_busca.get("results", [])
 
     if not produtos:
         return "Nenhum produto encontrado."
@@ -193,7 +227,11 @@ def buscar_produto():
     produto = produtos[0]
 
     product_id = produto.get("id")
-    nome = produto.get("name", "Produto")
+    nome = (
+        produto.get("name")
+        or produto.get("title")
+        or "Produto"
+    )
 
     if not product_id:
         return "Produto sem ID."
@@ -216,8 +254,13 @@ def buscar_produto():
 
     dados = detalhes.json()
 
+    # ==============================
+    # IMAGEM
+    # ==============================
+
     imagem = None
-    pictures = dados.get("pictures", [])
+
+    pictures = dados.get("pictures") or []
 
     if pictures:
         imagem = (
@@ -225,40 +268,105 @@ def buscar_produto():
             or pictures[0].get("url")
         )
 
+    if not imagem:
+        pictures_busca = produto.get("pictures") or []
+
+        if pictures_busca:
+            imagem = (
+                pictures_busca[0].get("secure_url")
+                or pictures_busca[0].get("url")
+            )
+
+    # ==============================
+    # PRECO E ITEM
+    # ==============================
+
     oferta = dados.get("buy_box_winner") or {}
 
     preco = oferta.get("price")
-    item_id = oferta.get("item_id")
 
     if preco is None:
-        preco_texto = "Consulte o preco no Mercado Livre"
-    else:
-        preco_texto = f"R$ {preco:,.2f}"
+        preco = produto.get("price")
 
-        preco_texto = (
-            preco_texto
-            .replace(",", "X")
-            .replace(".", ",")
-            .replace("X", ".")
-        )
+    preco_texto = formatar_preco(preco)
+
+    # Tenta encontrar o ID real do anuncio
+    # em varios lugares diferentes.
+    item_id = (
+        oferta.get("item_id")
+        or oferta.get("id")
+        or dados.get("item_id")
+        or produto.get("item_id")
+    )
+
+    # ==============================
+    # LINK NORMAL
+    # ==============================
 
     link_normal = ""
 
-    if item_id:
-        numero_item = str(item_id).replace("MLB", "")
+    # Primeiro tenta usar um permalink
+    # que venha diretamente da API.
+    link_normal = (
+        oferta.get("permalink")
+        or dados.get("permalink")
+        or produto.get("permalink")
+        or ""
+    )
 
-        link_normal = (
-            "https://produto.mercadolivre.com.br/"
-            f"MLB-{numero_item}"
-        )
+    # Se nao veio permalink, monta pelo item_id.
+    if not link_normal and item_id:
+        link_normal = montar_link_item(item_id)
 
-    # Guarda os dados para usar quando clicar PUBLICAR
+    # ==============================
+    # SE AINDA NAO TEM LINK
+    # BUSCA O ITEM DIRETAMENTE
+    # ==============================
+
+    if not link_normal and item_id:
+        try:
+            item_response = requests.get(
+                f"https://api.mercadolibre.com/items/{item_id}",
+                headers=headers,
+                timeout=15
+            )
+
+            if item_response.status_code == 200:
+                item_dados = item_response.json()
+
+                link_normal = (
+                    item_dados.get("permalink")
+                    or ""
+                )
+
+                if not imagem:
+                    imagem = (
+                        item_dados.get("secure_thumbnail")
+                        or item_dados.get("thumbnail")
+                    )
+
+                if preco is None:
+                    preco = item_dados.get("price")
+                    preco_texto = formatar_preco(preco)
+
+        except requests.RequestException:
+            pass
+
+    # ==============================
+    # GUARDA A OFERTA
+    # ==============================
+
     OFERTAS[str(product_id)] = {
         "nome": nome,
         "preco": preco_texto,
         "imagem": imagem,
-        "link_normal": link_normal
+        "link_normal": link_normal,
+        "item_id": str(item_id) if item_id else ""
     }
+
+    # ==============================
+    # MENSAGEM TELEGRAM
+    # ==============================
 
     legenda = (
         "🔥 OFERTA ENCONTRADA!\n\n"
@@ -271,10 +379,12 @@ def buscar_produto():
             "🔗 LINK DO PRODUTO:\n"
             f"{link_normal}\n\n"
         )
+    else:
+        legenda += (
+            "⚠️ Link do produto nao encontrado.\n\n"
+        )
 
-    legenda += (
-        "👇 Escolha o que fazer com essa oferta."
-    )
+    legenda += "👇 Escolha o que fazer com essa oferta."
 
     botoes = {
         "inline_keyboard": [
@@ -296,25 +406,32 @@ def buscar_produto():
         "reply_markup": botoes
     }
 
-    if imagem:
-        payload["photo"] = imagem
-        payload["caption"] = legenda
+    try:
+        if imagem:
+            payload["photo"] = imagem
+            payload["caption"] = legenda
 
-        telegram = telegram_api(
-            "sendPhoto",
-            payload
-        )
+            telegram = telegram_api(
+                "sendPhoto",
+                payload
+            )
 
-    else:
-        payload["text"] = legenda
+        else:
+            payload["text"] = legenda
 
-        telegram = telegram_api(
-            "sendMessage",
-            payload
-        )
+            telegram = telegram_api(
+                "sendMessage",
+                payload
+            )
+
+    except requests.RequestException:
+        return "Erro ao conectar com Telegram."
 
     if telegram.status_code != 200:
-        return "Erro ao enviar produto para Telegram."
+        return (
+            "Erro ao enviar produto para Telegram. "
+            f"Codigo: {telegram.status_code}"
+        )
 
     return """
     <h2>OFERTA ENVIADA! 🚀</h2>
@@ -327,7 +444,7 @@ def telegram_webhook():
     update = request.get_json(silent=True) or {}
 
     # ==============================
-    # CLIQUES NOS BOTOES
+    # BOTOES
     # ==============================
 
     callback = update.get("callback_query")
@@ -336,7 +453,10 @@ def telegram_webhook():
         callback_id = callback.get("id")
         callback_data = callback.get("data", "")
 
-        mensagem_callback = callback.get("message", {})
+        mensagem_callback = callback.get(
+            "message",
+            {}
+        )
 
         chat_id = (
             mensagem_callback
@@ -357,10 +477,22 @@ def telegram_webhook():
 
             return "OK", 200
 
+        # ==========================
+        # IGNORAR
+        # ==========================
+
         if callback_data.startswith("ignorar:"):
-            product_id = callback_data.split(":", 1)[1]
+            product_id = callback_data.split(
+                ":",
+                1
+            )[1]
 
             OFERTAS.pop(product_id, None)
+
+            AGUARDANDO_LINK.pop(
+                str(chat_id),
+                None
+            )
 
             telegram_api(
                 "answerCallbackQuery",
@@ -383,8 +515,15 @@ def telegram_webhook():
 
             return "OK", 200
 
+        # ==========================
+        # PUBLICAR
+        # ==========================
+
         if callback_data.startswith("publicar:"):
-            product_id = callback_data.split(":", 1)[1]
+            product_id = callback_data.split(
+                ":",
+                1
+            )[1]
 
             oferta_salva = OFERTAS.get(product_id)
 
@@ -397,9 +536,19 @@ def telegram_webhook():
                     }
                 )
 
-                return "OK", 200
+                telegram_api(
+                    "sendMessage",
+                    {
+                        "chat_id": TELEGRAM_CHAT_ID,
+                        "text": (
+                            "⚠️ Essa oferta nao esta mais "
+                            "na memoria do bot.\n\n"
+                            "Busque uma nova oferta."
+                        )
+                    }
+                )
 
-            AGUARDANDO_LINK[str(chat_id)] = product_id
+                return "OK", 200
 
             link_normal = oferta_salva.get(
                 "link_normal",
@@ -414,27 +563,37 @@ def telegram_webhook():
                 }
             )
 
+            if not link_normal:
+                telegram_api(
+                    "sendMessage",
+                    {
+                        "chat_id": TELEGRAM_CHAT_ID,
+                        "text": (
+                            "⚠️ Nao consegui encontrar "
+                            "o link normal dessa oferta.\n\n"
+                            "Busque outra oferta para "
+                            "nao publicar um link errado."
+                        )
+                    }
+                )
+
+                return "OK", 200
+
+            AGUARDANDO_LINK[str(chat_id)] = product_id
+
             texto = (
                 "💰 OFERTA APROVADA!\n\n"
                 "Agora precisamos transformar o link "
                 "normal em link de afiliado.\n\n"
+                "🔗 COPIE ESTE LINK:\n\n"
+                f"{link_normal}\n\n"
+                "1️⃣ Cole esse link no Gerador de Links "
+                "do Mercado Livre.\n\n"
+                "2️⃣ Gere seu link de afiliado.\n\n"
+                "3️⃣ Copie o link gerado.\n\n"
+                "4️⃣ Volte para esta conversa com o bot "
+                "e cole o link aqui. 👇"
             )
-
-            if link_normal:
-                texto += (
-                    "🔗 COPIE ESTE LINK:\n\n"
-                    f"{link_normal}\n\n"
-                    "1️⃣ Cole no Gerador de Links "
-                    "do Mercado Livre.\n\n"
-                    "2️⃣ Gere seu link de afiliado.\n\n"
-                    "3️⃣ Volte aqui e COLE o link "
-                    "de afiliado na conversa comigo. 👇"
-                )
-
-            else:
-                texto += (
-                    "Nao encontrei o link normal dessa oferta."
-                )
 
             telegram_api(
                 "sendMessage",
@@ -447,16 +606,17 @@ def telegram_webhook():
             return "OK", 200
 
     # ==============================
-    # MENSAGENS ENVIADAS AO BOT
+    # MENSAGENS PARA O BOT
     # ==============================
 
     mensagem = update.get("message")
 
     if mensagem:
-        chat_id = mensagem.get(
-            "chat",
-            {}
-        ).get("id")
+        chat_id = (
+            mensagem
+            .get("chat", {})
+            .get("id")
+        )
 
         texto = mensagem.get(
             "text",
@@ -473,6 +633,9 @@ def telegram_webhook():
         if not product_id:
             return "OK", 200
 
+        # Aceita o link que o usuario colar.
+        # O bot usa exatamente esse link,
+        # sem inventar parametros de afiliado.
         if (
             texto.startswith("https://")
             or texto.startswith("http://")
@@ -483,6 +646,17 @@ def telegram_webhook():
                 AGUARDANDO_LINK.pop(
                     str(chat_id),
                     None
+                )
+
+                telegram_api(
+                    "sendMessage",
+                    {
+                        "chat_id": TELEGRAM_CHAT_ID,
+                        "text": (
+                            "⚠️ A oferta expirou da memoria. "
+                            "Busque uma nova oferta."
+                        )
+                    }
                 )
 
                 return "OK", 200
@@ -509,14 +683,15 @@ def telegram_webhook():
                 {
                     "chat_id": TELEGRAM_CHAT_ID,
                     "text": (
-                        "✅ LINK DE AFILIADO RECEBIDO!\n\n"
+                        "✅ LINK RECEBIDO!\n\n"
                         f"📦 {nome}\n\n"
                         f"💰 {preco}\n\n"
-                        "🔗 Seu link foi associado "
-                        "a essa oferta.\n\n"
-                        "🔒 Ainda NAO publiquei no canal.\n\n"
-                        "Agora podemos montar a postagem "
-                        "final e enviar para o canal."
+                        "🔗 Guardei exatamente o link "
+                        "que voce enviou.\n\n"
+                        "🔒 A oferta ainda NAO foi "
+                        "publicada no canal.\n\n"
+                        "Proximo passo: criar a postagem "
+                        "final com esse link."
                     )
                 }
             )
@@ -527,9 +702,9 @@ def telegram_webhook():
                 {
                     "chat_id": TELEGRAM_CHAT_ID,
                     "text": (
-                        "⚠️ Estou esperando o seu "
-                        "link de afiliado.\n\n"
-                        "Cole o link completo aqui."
+                        "⚠️ Estou esperando um link.\n\n"
+                        "Cole o link completo gerado "
+                        "pelo Mercado Livre aqui."
                     )
                 }
             )
