@@ -1,71 +1,26 @@
 from flask import Flask, request, redirect
 import os
 import requests
+import html
 
 app = Flask(__name__)
 
 CLIENT_ID = os.environ.get("ML_CLIENT_ID", "").strip()
 CLIENT_SECRET = os.environ.get("ML_CLIENT_SECRET", "").strip()
-TELEGRAM_BOT_TOKEN = os.environ.get(
-    "TELEGRAM_BOT_TOKEN", ""
-).strip()
-TELEGRAM_CHAT_ID = os.environ.get(
-    "TELEGRAM_CHAT_ID", ""
-).strip()
 
 BASE_URL = "https://ofertas-mercado-livre-bot.onrender.com"
 REDIRECT_URI = f"{BASE_URL}/oauth/callback"
 
 ML_ACCESS_TOKEN = None
 
-TIMEOUT = 4
-
-# Poucas categorias por execucao para evitar
-# WORKER TIMEOUT no Render.
-TERMOS = [
-    "smartphone",
-    "fone bluetooth",
-    "air fryer",
-    "perfume"
-]
+TIMEOUT = 5
+TERMO = "perfume"
 
 
 def ml_headers():
     return {
         "Authorization": f"Bearer {ML_ACCESS_TOKEN}"
     }
-
-
-def telegram_api(metodo, payload):
-    url = (
-        "https://api.telegram.org/"
-        f"bot{TELEGRAM_BOT_TOKEN}/{metodo}"
-    )
-
-    return requests.post(
-        url,
-        json=payload,
-        timeout=TIMEOUT
-    )
-
-
-def formatar_preco(valor):
-    if valor is None:
-        return "Consulte o preco"
-
-    try:
-        valor = float(valor)
-    except (TypeError, ValueError):
-        return str(valor)
-
-    texto = f"R$ {valor:,.2f}"
-
-    return (
-        texto
-        .replace(",", "X")
-        .replace(".", ",")
-        .replace("X", ".")
-    )
 
 
 @app.route("/")
@@ -80,8 +35,8 @@ def home():
     </p>
 
     <p>
-        <a href="/buscar-item-ranking">
-            2 - Cacar anuncio nos mais vendidos 🔥
+        <a href="/diagnostico-user-product">
+            2 - Testar USER_PRODUCT 🔎
         </a>
     </p>
     """
@@ -122,7 +77,7 @@ def oauth_callback():
         )
 
     except requests.RequestException:
-        return "Erro de conexao com Mercado Livre."
+        return "Erro ao conectar ao Mercado Livre."
 
     if resposta.status_code != 200:
         return (
@@ -144,14 +99,14 @@ def oauth_callback():
     <h2>Mercado Livre conectado! ✅</h2>
 
     <p>
-        <a href="/buscar-item-ranking">
-            Cacar anuncio 🔥
+        <a href="/diagnostico-user-product">
+            Testar USER_PRODUCT 🔎
         </a>
     </p>
     """
 
 
-def descobrir_categoria(termo):
+def descobrir_categoria():
     try:
         resposta = requests.get(
             (
@@ -160,27 +115,27 @@ def descobrir_categoria(termo):
             ),
             headers=ml_headers(),
             params={
-                "q": termo,
+                "q": TERMO,
                 "limit": 1
             },
             timeout=TIMEOUT
         )
 
     except requests.RequestException:
-        return None
+        return None, "ERRO_CONEXAO"
 
     if resposta.status_code != 200:
-        return None
+        return None, str(resposta.status_code)
 
     try:
         dados = resposta.json()
     except ValueError:
-        return None
+        return None, "JSON_INVALIDO"
 
     if not dados:
-        return None
+        return None, "VAZIO"
 
-    return dados[0].get("category_id")
+    return dados[0].get("category_id"), "200"
 
 
 def consultar_ranking(category_id):
@@ -195,147 +150,60 @@ def consultar_ranking(category_id):
         )
 
     except requests.RequestException:
-        return []
+        return [], "ERRO_CONEXAO"
 
     if resposta.status_code != 200:
-        return []
+        return [], str(resposta.status_code)
 
     try:
         dados = resposta.json()
     except ValueError:
-        return []
+        return [], "JSON_INVALIDO"
 
-    resultados = dados.get("content") or []
-
-    return sorted(
-        resultados,
-        key=lambda x: x.get("position", 999)
-    )[:10]
+    return dados.get("content") or [], "200"
 
 
-def consultar_item(item_id):
+def consultar_user_product(user_product_id):
     try:
         resposta = requests.get(
             (
                 "https://api.mercadolibre.com/"
-                f"items/{item_id}"
+                f"user-products/{user_product_id}"
             ),
             headers=ml_headers(),
             timeout=TIMEOUT
         )
 
     except requests.RequestException:
-        return None
+        return None, "ERRO_CONEXAO"
+
+    status = str(resposta.status_code)
 
     if resposta.status_code != 200:
-        return None
+        try:
+            erro = resposta.json()
+        except ValueError:
+            erro = resposta.text[:500]
+
+        return {
+            "erro": erro
+        }, status
 
     try:
-        item = resposta.json()
+        return resposta.json(), status
     except ValueError:
-        return None
-
-    if item.get("status") != "active":
-        return None
-
-    permalink = item.get("permalink")
-
-    if not permalink:
-        return None
-
-    pictures = item.get("pictures") or []
-
-    imagem = (
-        item.get("secure_thumbnail")
-        or item.get("thumbnail")
-        or ""
-    )
-
-    if pictures:
-        primeira = pictures[0]
-
-        if isinstance(primeira, dict):
-            imagem = (
-                primeira.get("secure_url")
-                or primeira.get("url")
-                or imagem
-            )
-
-    return {
-        "id": str(item_id),
-        "titulo": item.get("title") or "Produto",
-        "preco": item.get("price"),
-        "preco_original": item.get("original_price"),
-        "link": permalink,
-        "imagem": imagem
-    }
+        return None, "JSON_INVALIDO"
 
 
-def encontrar_item_ranking():
-    relatorio = []
+def valor_seguro(valor):
+    if valor is None:
+        return "-"
 
-    for termo in TERMOS:
-        categoria = descobrir_categoria(termo)
-
-        if not categoria:
-            relatorio.append(
-                f"{termo}: categoria nao encontrada"
-            )
-            continue
-
-        ranking = consultar_ranking(categoria)
-
-        if not ranking:
-            relatorio.append(
-                f"{termo}: ranking vazio"
-            )
-            continue
-
-        tipos = []
-
-        for resultado in ranking:
-            tipo = str(
-                resultado.get("type", "")
-            ).upper()
-
-            tipos.append(tipo)
-
-            if tipo != "ITEM":
-                continue
-
-            item_id = resultado.get("id")
-
-            if not item_id:
-                continue
-
-            item = consultar_item(item_id)
-
-            if not item:
-                continue
-
-            item["posicao"] = resultado.get(
-                "position",
-                "?"
-            )
-
-            item["termo"] = termo
-            item["categoria"] = categoria
-
-            return item, relatorio
-
-        resumo = ", ".join(
-            sorted(set(tipos))
-        )
-
-        relatorio.append(
-            f"{termo}: {resumo}"
-        )
-
-    return None, relatorio
+    return html.escape(str(valor))
 
 
-@app.route("/buscar-item-ranking")
-def buscar_item_ranking():
+@app.route("/diagnostico-user-product")
+def diagnostico_user_product():
     if not ML_ACCESS_TOKEN:
         return """
         <h3>Conecte o Mercado Livre primeiro.</h3>
@@ -347,95 +215,181 @@ def buscar_item_ranking():
         </p>
         """
 
-    item, relatorio = encontrar_item_ranking()
+    categoria, status_categoria = descobrir_categoria()
 
-    if not item:
-        linhas = ""
-
-        for linha in relatorio:
-            linhas += f"<p>{linha}</p>"
-
-        return f"""
-        <h2>
-            Busca terminou sem travar ✅
-        </h2>
-
-        <p>
-            Ainda nao apareceu ITEM compravel
-            nos rankings testados.
-        </p>
-
-        <h3>Resultado:</h3>
-
-        {linhas}
-
-        <p>
-            Nenhum produto errado foi enviado.
-        </p>
-        """
-
-    titulo = item["titulo"]
-    preco = formatar_preco(item["preco"])
-    link = item["link"]
-    imagem = item["imagem"]
-    posicao = item["posicao"]
-    termo = item["termo"]
-
-    texto = (
-        "🔥 MAIS VENDIDO COM ANUNCIO REAL!\n\n"
-        f"🏆 Ranking: #{posicao}\n"
-        f"📂 Busca: {termo}\n\n"
-        f"📦 {titulo}\n\n"
-        f"💰 {preco}\n\n"
-        "🔗 LINK REAL DO ANUNCIO:\n"
-        f"{link}"
-    )
-
-    payload = {
-        "chat_id": TELEGRAM_CHAT_ID
-    }
-
-    try:
-        if imagem:
-            payload["photo"] = imagem
-            payload["caption"] = texto
-
-            telegram = telegram_api(
-                "sendPhoto",
-                payload
-            )
-
-        else:
-            payload["text"] = texto
-
-            telegram = telegram_api(
-                "sendMessage",
-                payload
-            )
-
-    except requests.RequestException:
-        return """
-        <h3>
-            Achei o ITEM, mas o Telegram
-            nao respondeu.
-        </h3>
-        """
-
-    if telegram.status_code != 200:
+    if not categoria:
         return (
-            "<h3>Achei o ITEM, mas Telegram HTTP "
-            f"{telegram.status_code}</h3>"
+            "<h3>Falha ao descobrir categoria.</h3>"
+            f"<p>HTTP: {status_categoria}</p>"
         )
 
-    return """
-    <h2>ACHAMOS UM ITEM REAL! 🔥🔥🔥</h2>
+    ranking, status_ranking = consultar_ranking(
+        categoria
+    )
+
+    if not ranking:
+        return (
+            "<h3>Ranking vazio ou indisponivel.</h3>"
+            f"<p>HTTP: {status_ranking}</p>"
+        )
+
+    user_product = None
+
+    for resultado in ranking:
+        tipo = str(
+            resultado.get("type", "")
+        ).upper()
+
+        if tipo == "USER_PRODUCT":
+            user_product = resultado
+            break
+
+    if not user_product:
+        tipos = []
+
+        for resultado in ranking:
+            tipos.append(
+                str(
+                    resultado.get("type", "")
+                ).upper()
+            )
+
+        tipos = sorted(set(tipos))
+
+        return f"""
+        <h2>Nenhum USER_PRODUCT encontrado.</h2>
+
+        <p>
+            Categoria: {valor_seguro(categoria)}
+        </p>
+
+        <p>
+            Tipos encontrados:
+            {valor_seguro(", ".join(tipos))}
+        </p>
+        """
+
+    user_product_id = user_product.get("id")
+    posicao = user_product.get("position", "?")
+
+    dados, status = consultar_user_product(
+        user_product_id
+    )
+
+    if not dados:
+        return f"""
+        <h2>USER_PRODUCT encontrado ✅</h2>
+
+        <p>
+            Ranking: #{valor_seguro(posicao)}
+        </p>
+
+        <p>
+            ID: {valor_seguro(user_product_id)}
+        </p>
+
+        <p>
+            Mas a consulta falhou.
+            HTTP: {valor_seguro(status)}
+        </p>
+        """
+
+    if status != "200":
+        return f"""
+        <h2>USER_PRODUCT encontrado ✅</h2>
+
+        <p>
+            Ranking: #{valor_seguro(posicao)}
+        </p>
+
+        <p>
+            ID: {valor_seguro(user_product_id)}
+        </p>
+
+        <p>
+            Consulta /user-products:
+            HTTP {valor_seguro(status)}
+        </p>
+
+        <pre>
+{valor_seguro(dados)}
+        </pre>
+        """
+
+    # Mostramos somente campos uteis.
+    # Nao exibimos token nem credenciais.
+    campos = [
+        "id",
+        "name",
+        "status",
+        "site_id",
+        "domain_id",
+        "catalog_product_id",
+        "family_name",
+        "user_id",
+        "seller_id",
+        "item_id",
+        "item_ids",
+        "permalink",
+        "price"
+    ]
+
+    linhas = ""
+
+    for campo in campos:
+        if campo in dados:
+            linhas += (
+                "<p><b>"
+                f"{valor_seguro(campo)}"
+                ":</b> "
+                f"{valor_seguro(dados.get(campo))}"
+                "</p>"
+            )
+
+    # Alguns dados podem estar dentro
+    # de estruturas internas.
+    chaves = ", ".join(
+        sorted(dados.keys())
+    )
+
+    return f"""
+    <h2>USER_PRODUCT CONSULTADO! 🔥</h2>
 
     <p>
-        Produto enviado para o Telegram.
+        <b>Termo:</b> perfume
     </p>
 
     <p>
-        O link veio diretamente do anuncio.
+        <b>Categoria:</b>
+        {valor_seguro(categoria)}
+    </p>
+
+    <p>
+        <b>Ranking:</b>
+        #{valor_seguro(posicao)}
+    </p>
+
+    <p>
+        <b>USER_PRODUCT ID:</b>
+        {valor_seguro(user_product_id)}
+    </p>
+
+    <p>
+        <b>HTTP /user-products:</b>
+        {valor_seguro(status)}
+    </p>
+
+    <hr>
+
+    <h3>Campos encontrados:</h3>
+
+    {linhas}
+
+    <hr>
+
+    <p>
+        <b>Todas as chaves recebidas:</b>
+        {valor_seguro(chaves)}
     </p>
     """
 
