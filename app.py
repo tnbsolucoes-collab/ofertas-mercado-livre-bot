@@ -1,12 +1,19 @@
 from flask import Flask, request, redirect
 import os
 import requests
-import html
 
 app = Flask(__name__)
 
 CLIENT_ID = os.environ.get("ML_CLIENT_ID", "").strip()
 CLIENT_SECRET = os.environ.get("ML_CLIENT_SECRET", "").strip()
+
+TELEGRAM_BOT_TOKEN = os.environ.get(
+    "TELEGRAM_BOT_TOKEN", ""
+).strip()
+
+TELEGRAM_CHAT_ID = os.environ.get(
+    "TELEGRAM_CHAT_ID", ""
+).strip()
 
 BASE_URL = "https://ofertas-mercado-livre-bot.onrender.com"
 REDIRECT_URI = f"{BASE_URL}/oauth/callback"
@@ -14,13 +21,73 @@ REDIRECT_URI = f"{BASE_URL}/oauth/callback"
 ML_ACCESS_TOKEN = None
 
 TIMEOUT = 5
-TERMO = "perfume"
+
+TERMOS = [
+    "iphone",
+    "samsung galaxy",
+    "motorola",
+    "fone bluetooth",
+    "air fryer",
+    "smart tv",
+    "notebook",
+    "perfume"
+]
 
 
 def ml_headers():
     return {
         "Authorization": f"Bearer {ML_ACCESS_TOKEN}"
     }
+
+
+def formatar_preco(valor):
+    if valor is None:
+        return "-"
+
+    try:
+        valor = float(valor)
+    except (TypeError, ValueError):
+        return str(valor)
+
+    texto = f"R$ {valor:,.2f}"
+
+    return (
+        texto
+        .replace(",", "X")
+        .replace(".", ",")
+        .replace("X", ".")
+    )
+
+
+def calcular_desconto(preco, original):
+    try:
+        preco = float(preco)
+        original = float(original)
+
+        if original <= preco or original <= 0:
+            return None
+
+        desconto = (
+            (original - preco) / original
+        ) * 100
+
+        return round(desconto)
+
+    except (TypeError, ValueError):
+        return None
+
+
+def telegram_api(metodo, payload):
+    url = (
+        "https://api.telegram.org/"
+        f"bot{TELEGRAM_BOT_TOKEN}/{metodo}"
+    )
+
+    return requests.post(
+        url,
+        json=payload,
+        timeout=TIMEOUT
+    )
 
 
 @app.route("/")
@@ -35,8 +102,8 @@ def home():
     </p>
 
     <p>
-        <a href="/diagnostico-user-product">
-            2 - Testar USER_PRODUCT 🔎
+        <a href="/buscar-buybox">
+            2 - Procurar oferta real 🔥
         </a>
     </p>
     """
@@ -99,53 +166,27 @@ def oauth_callback():
     <h2>Mercado Livre conectado! ✅</h2>
 
     <p>
-        <a href="/diagnostico-user-product">
-            Testar USER_PRODUCT 🔎
+        <a href="/buscar-buybox">
+            Procurar oferta real 🔥
         </a>
     </p>
     """
 
 
-def descobrir_categoria():
+def buscar_produtos(termo):
     try:
         resposta = requests.get(
             (
                 "https://api.mercadolibre.com/"
-                "sites/MLB/domain_discovery/search"
+                "products/search"
             ),
             headers=ml_headers(),
             params={
-                "q": TERMO,
-                "limit": 1
+                "status": "active",
+                "site_id": "MLB",
+                "q": termo,
+                "limit": 10
             },
-            timeout=TIMEOUT
-        )
-
-    except requests.RequestException:
-        return None, "ERRO_CONEXAO"
-
-    if resposta.status_code != 200:
-        return None, str(resposta.status_code)
-
-    try:
-        dados = resposta.json()
-    except ValueError:
-        return None, "JSON_INVALIDO"
-
-    if not dados:
-        return None, "VAZIO"
-
-    return dados[0].get("category_id"), "200"
-
-
-def consultar_ranking(category_id):
-    try:
-        resposta = requests.get(
-            (
-                "https://api.mercadolibre.com/"
-                f"highlights/MLB/category/{category_id}"
-            ),
-            headers=ml_headers(),
             timeout=TIMEOUT
         )
 
@@ -160,50 +201,217 @@ def consultar_ranking(category_id):
     except ValueError:
         return [], "JSON_INVALIDO"
 
-    return dados.get("content") or [], "200"
+    return dados.get("results") or [], "200"
 
 
-def consultar_user_product(user_product_id):
+def consultar_produto(product_id):
     try:
         resposta = requests.get(
             (
                 "https://api.mercadolibre.com/"
-                f"user-products/{user_product_id}"
+                f"products/{product_id}"
             ),
             headers=ml_headers(),
             timeout=TIMEOUT
         )
 
     except requests.RequestException:
-        return None, "ERRO_CONEXAO"
-
-    status = str(resposta.status_code)
+        return None
 
     if resposta.status_code != 200:
-        try:
-            erro = resposta.json()
-        except ValueError:
-            erro = resposta.text[:500]
-
-        return {
-            "erro": erro
-        }, status
+        return None
 
     try:
-        return resposta.json(), status
+        return resposta.json()
     except ValueError:
-        return None, "JSON_INVALIDO"
+        return None
 
 
-def valor_seguro(valor):
-    if valor is None:
-        return "-"
+def imagem_produto(produto):
+    pictures = produto.get("pictures") or []
 
-    return html.escape(str(valor))
+    if pictures:
+        primeira = pictures[0]
+
+        if isinstance(primeira, dict):
+            return (
+                primeira.get("secure_url")
+                or primeira.get("url")
+                or ""
+            )
+
+    return ""
 
 
-@app.route("/diagnostico-user-product")
-def diagnostico_user_product():
+def extrair_oferta(produto, termo):
+    buybox = produto.get("buy_box_winner")
+
+    if not isinstance(buybox, dict):
+        return None
+
+    item_id = buybox.get("item_id")
+    preco = buybox.get("price")
+
+    if not item_id or preco is None:
+        return None
+
+    original = buybox.get("original_price")
+
+    desconto = calcular_desconto(
+        preco,
+        original
+    )
+
+    nome = (
+        produto.get("name")
+        or produto.get("family_name")
+        or "Produto Mercado Livre"
+    )
+
+    # Preferimos o permalink oficial
+    # da pagina de produto retornado pela API.
+    link = produto.get("permalink")
+
+    if not link:
+        return None
+
+    return {
+        "item_id": item_id,
+        "product_id": produto.get("id"),
+        "titulo": nome,
+        "preco": preco,
+        "original": original,
+        "desconto": desconto,
+        "link": link,
+        "imagem": imagem_produto(produto),
+        "termo": termo,
+        "frete_gratis": (
+            buybox.get("shipping", {})
+            .get("free_shipping", False)
+        )
+    }
+
+
+def encontrar_oferta():
+    diagnostico = []
+
+    for termo in TERMOS:
+
+        produtos, status = buscar_produtos(termo)
+
+        diagnostico.append(
+            f"{termo}: HTTP {status} / "
+            f"{len(produtos)} produtos"
+        )
+
+        if status != "200":
+            continue
+
+        # Evita dezenas de requisicoes.
+        # Primeiro usamos os dados retornados
+        # pelo proprio products/search.
+        for resumo in produtos:
+
+            buybox = resumo.get(
+                "buy_box_winner"
+            )
+
+            if isinstance(buybox, dict):
+
+                oferta = extrair_oferta(
+                    resumo,
+                    termo
+                )
+
+                if oferta:
+                    return oferta, diagnostico
+
+        # Se a resposta resumida nao trouxe
+        # buy box, consultamos poucos produtos.
+        for resumo in produtos[:4]:
+
+            product_id = resumo.get("id")
+
+            if not product_id:
+                continue
+
+            produto = consultar_produto(
+                product_id
+            )
+
+            if not produto:
+                continue
+
+            oferta = extrair_oferta(
+                produto,
+                termo
+            )
+
+            if oferta:
+                return oferta, diagnostico
+
+    return None, diagnostico
+
+
+def enviar_telegram(oferta):
+    preco = formatar_preco(
+        oferta["preco"]
+    )
+
+    original = oferta["original"]
+    desconto = oferta["desconto"]
+
+    linhas_preco = f"💰 Preco: {preco}"
+
+    if original and desconto:
+        linhas_preco = (
+            f"~~{formatar_preco(original)}~~\n"
+            f"🔥 {preco}\n"
+            f"📉 {desconto}% OFF"
+        )
+
+    frete = ""
+
+    if oferta["frete_gratis"]:
+        frete = "\n🚚 Frete gratis"
+
+    texto = (
+        "🔥 OFERTA REAL ENCONTRADA!\n\n"
+        f"📦 {oferta['titulo']}\n\n"
+        f"{linhas_preco}"
+        f"{frete}\n\n"
+        f"🔎 Item: {oferta['item_id']}\n\n"
+        "🛒 VER PRODUTO:\n"
+        f"{oferta['link']}"
+    )
+
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID
+    }
+
+    imagem = oferta["imagem"]
+
+    if imagem:
+        payload["photo"] = imagem
+        payload["caption"] = texto
+        payload["parse_mode"] = "Markdown"
+
+        return telegram_api(
+            "sendPhoto",
+            payload
+        )
+
+    payload["text"] = texto
+    payload["parse_mode"] = "Markdown"
+
+    return telegram_api(
+        "sendMessage",
+        payload
+    )
+
+
+@app.route("/buscar-buybox")
+def buscar_buybox():
     if not ML_ACCESS_TOKEN:
         return """
         <h3>Conecte o Mercado Livre primeiro.</h3>
@@ -215,181 +423,79 @@ def diagnostico_user_product():
         </p>
         """
 
-    categoria, status_categoria = descobrir_categoria()
+    oferta, diagnostico = encontrar_oferta()
 
-    if not categoria:
-        return (
-            "<h3>Falha ao descobrir categoria.</h3>"
-            f"<p>HTTP: {status_categoria}</p>"
+    if not oferta:
+        linhas = ""
+
+        for linha in diagnostico:
+            linhas += f"<p>{linha}</p>"
+
+        return f"""
+        <h2>Busca concluida ✅</h2>
+
+        <p>
+            Nenhum Buy Box utilizavel foi
+            encontrado nesta rodada.
+        </p>
+
+        <h3>Diagnostico:</h3>
+
+        {linhas}
+
+        <p>
+            Nenhum produto errado foi enviado.
+        </p>
+        """
+
+    try:
+        resposta_tg = enviar_telegram(
+            oferta
         )
 
-    ranking, status_ranking = consultar_ranking(
-        categoria
-    )
+    except requests.RequestException:
+        return """
+        <h2>Oferta encontrada ✅</h2>
 
-    if not ranking:
+        <p>
+            Mas ocorreu erro ao enviar
+            para o Telegram.
+        </p>
+        """
+
+    if resposta_tg.status_code != 200:
         return (
-            "<h3>Ranking vazio ou indisponivel.</h3>"
-            f"<p>HTTP: {status_ranking}</p>"
+            "<h2>Oferta encontrada ✅</h2>"
+            "<p>Telegram respondeu HTTP "
+            f"{resposta_tg.status_code}</p>"
         )
 
-    user_product = None
+    desconto = oferta["desconto"]
 
-    for resultado in ranking:
-        tipo = str(
-            resultado.get("type", "")
-        ).upper()
-
-        if tipo == "USER_PRODUCT":
-            user_product = resultado
-            break
-
-    if not user_product:
-        tipos = []
-
-        for resultado in ranking:
-            tipos.append(
-                str(
-                    resultado.get("type", "")
-                ).upper()
-            )
-
-        tipos = sorted(set(tipos))
-
-        return f"""
-        <h2>Nenhum USER_PRODUCT encontrado.</h2>
-
-        <p>
-            Categoria: {valor_seguro(categoria)}
-        </p>
-
-        <p>
-            Tipos encontrados:
-            {valor_seguro(", ".join(tipos))}
-        </p>
-        """
-
-    user_product_id = user_product.get("id")
-    posicao = user_product.get("position", "?")
-
-    dados, status = consultar_user_product(
-        user_product_id
-    )
-
-    if not dados:
-        return f"""
-        <h2>USER_PRODUCT encontrado ✅</h2>
-
-        <p>
-            Ranking: #{valor_seguro(posicao)}
-        </p>
-
-        <p>
-            ID: {valor_seguro(user_product_id)}
-        </p>
-
-        <p>
-            Mas a consulta falhou.
-            HTTP: {valor_seguro(status)}
-        </p>
-        """
-
-    if status != "200":
-        return f"""
-        <h2>USER_PRODUCT encontrado ✅</h2>
-
-        <p>
-            Ranking: #{valor_seguro(posicao)}
-        </p>
-
-        <p>
-            ID: {valor_seguro(user_product_id)}
-        </p>
-
-        <p>
-            Consulta /user-products:
-            HTTP {valor_seguro(status)}
-        </p>
-
-        <pre>
-{valor_seguro(dados)}
-        </pre>
-        """
-
-    # Mostramos somente campos uteis.
-    # Nao exibimos token nem credenciais.
-    campos = [
-        "id",
-        "name",
-        "status",
-        "site_id",
-        "domain_id",
-        "catalog_product_id",
-        "family_name",
-        "user_id",
-        "seller_id",
-        "item_id",
-        "item_ids",
-        "permalink",
-        "price"
-    ]
-
-    linhas = ""
-
-    for campo in campos:
-        if campo in dados:
-            linhas += (
-                "<p><b>"
-                f"{valor_seguro(campo)}"
-                ":</b> "
-                f"{valor_seguro(dados.get(campo))}"
-                "</p>"
-            )
-
-    # Alguns dados podem estar dentro
-    # de estruturas internas.
-    chaves = ", ".join(
-        sorted(dados.keys())
+    info_desconto = (
+        f"{desconto}% OFF"
+        if desconto
+        else "sem desconto informado"
     )
 
     return f"""
-    <h2>USER_PRODUCT CONSULTADO! 🔥</h2>
+    <h2>OFERTA REAL ENCONTRADA! 🔥🔥🔥</h2>
 
     <p>
-        <b>Termo:</b> perfume
+        Produto enviado para seu Telegram.
     </p>
 
     <p>
-        <b>Categoria:</b>
-        {valor_seguro(categoria)}
+        Item: {oferta['item_id']}
     </p>
 
     <p>
-        <b>Ranking:</b>
-        #{valor_seguro(posicao)}
+        Desconto:
+        {info_desconto}
     </p>
 
     <p>
-        <b>USER_PRODUCT ID:</b>
-        {valor_seguro(user_product_id)}
-    </p>
-
-    <p>
-        <b>HTTP /user-products:</b>
-        {valor_seguro(status)}
-    </p>
-
-    <hr>
-
-    <h3>Campos encontrados:</h3>
-
-    {linhas}
-
-    <hr>
-
-    <p>
-        <b>Todas as chaves recebidas:</b>
-        {valor_seguro(chaves)}
+        Agora confira o produto no Telegram.
     </p>
     """
 
