@@ -949,6 +949,11 @@ def status():
 
 
 
+@app.route("/ping")
+def ping():
+    return "OK", 200
+
+
 @app.route("/cron/buscar-oferta")
 def cron_buscar_oferta():
     if not CRON_SECRET:
@@ -1447,116 +1452,3 @@ def telegram_webhook():
         return "OK", 200
 
     return "OK", 200
-
-
-
-def executar_busca_automatica():
-    """Busca uma oferta a cada 1 hora e envia para aprovação privada."""
-    while True:
-        try:
-            # Espera 1 hora antes de cada busca automática.
-            time.sleep(3600)
-
-            if not ML_ACCESS_TOKEN:
-                print("BUSCA AUTOMATICA: aguardando login do Mercado Livre.")
-                continue
-
-            oferta = encontrar_mais_vendido()
-            if not oferta:
-                print("BUSCA AUTOMATICA: nenhuma oferta encontrada.")
-                continue
-
-            chave = str(oferta.get("item_id") or oferta.get("product_id") or oferta.get("link") or "")
-            if chave and chave in PRODUTOS_JA_ENVIADOS:
-                print(f"BUSCA AUTOMATICA: produto repetido ignorado: {chave}")
-                continue
-
-            if chave:
-                PRODUTOS_JA_ENVIADOS.add(chave)
-
-            item_id = str(oferta.get("item_id") or oferta.get("product_id") or int(time.time()))
-            OFERTAS[item_id] = oferta
-
-            nome = oferta.get("nome") or oferta.get("title") or "Produto"
-            preco = oferta.get("preco")
-            preco_original = oferta.get("preco_original")
-            desconto = oferta.get("desconto")
-            link = oferta.get("link") or ""
-            imagem = oferta.get("imagem")
-
-            linhas = ["🔥 OFERTA ENCONTRADA AUTOMATICAMENTE!", "", f"📦 {nome}"]
-
-            if desconto and preco:
-                linhas.append(f"📉 {desconto}% OFF")
-                if preco_original:
-                    linhas.append(f"💵 De: R$ {float(preco_original):,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
-                linhas.append(f"🔥 Por: R$ {float(preco):,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
-            elif preco:
-                linhas.append(f"💰 R$ {float(preco):,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
-            else:
-                linhas.append("💰 Confira o preço atual no link 👇")
-
-            linhas.extend(["", f"🔗 Link normal: {link}", "", "Quer preparar essa oferta para publicar?"])
-            legenda = "\n".join(linhas)
-
-            teclado = {
-                "inline_keyboard": [[
-                    {"text": "✅ PUBLICAR", "callback_data": f"publicar:{item_id}"},
-                    {"text": "❌ IGNORAR", "callback_data": f"ignorar:{item_id}"}
-                ]]
-            }
-
-            if imagem:
-                resposta = telegram_api(
-                    "sendPhoto",
-                    {
-                        "chat_id": TELEGRAM_CHAT_ID,
-                        "photo": imagem,
-                        "caption": legenda,
-                        "reply_markup": teclado
-                    }
-                )
-            else:
-                resposta = telegram_api(
-                    "sendMessage",
-                    {
-                        "chat_id": TELEGRAM_CHAT_ID,
-                        "text": legenda,
-                        "reply_markup": teclado,
-                        "disable_web_page_preview": False
-                    }
-                )
-
-            print(f"BUSCA AUTOMATICA TELEGRAM: {resposta.get('ok') if isinstance(resposta, dict) else resposta}")
-
-        except Exception as erro:
-            print(f"ERRO NA BUSCA AUTOMATICA: {erro}")
-
-
-def iniciar_busca_automatica():
-    global BUSCA_AUTOMATICA_INICIADA
-
-    if BUSCA_AUTOMATICA_INICIADA:
-        return
-
-    BUSCA_AUTOMATICA_INICIADA = True
-    thread = threading.Thread(target=executar_busca_automatica, daemon=True)
-    thread.start()
-    print("BUSCA AUTOMATICA: iniciada, intervalo de 1 hora.")
-
-
-# Agendamento externo (cron-job.org) e usado no lugar do loop interno.
-
-
-if __name__ == "__main__":
-    port = int(
-        os.environ.get(
-            "PORT",
-            5000
-        )
-    )
-
-    app.run(
-        host="0.0.0.0",
-        port=port
-    )
