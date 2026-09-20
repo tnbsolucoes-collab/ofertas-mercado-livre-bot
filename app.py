@@ -106,6 +106,12 @@ def preparar_banco():
                     updated_at TIMESTAMPTZ DEFAULT NOW()
                 )
             """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS produtos_enviados (
+                    produto_id TEXT PRIMARY KEY,
+                    enviado_em TIMESTAMPTZ DEFAULT NOW()
+                )
+            """)
         conexao.commit()
         return True
     except Exception as erro:
@@ -262,6 +268,73 @@ def garantir_token_ml():
             return True
 
         return renovar_token_ml()
+
+
+
+def produto_ja_enviado(produto_id):
+    produto_id = str(produto_id or "").strip()
+    if not produto_id:
+        return False
+
+    if produto_ja_enviado(produto_id):
+        return True
+
+    if not preparar_banco():
+        return False
+
+    conexao = None
+    try:
+        conexao = conectar_banco()
+        with conexao.cursor() as cursor:
+            cursor.execute(
+                "SELECT 1 FROM produtos_enviados WHERE produto_id = %s LIMIT 1",
+                (produto_id,)
+            )
+            existe = cursor.fetchone() is not None
+
+        if existe:
+            registrar_produto_enviado(produto_id)
+
+        return existe
+    except Exception as erro:
+        print(f"HISTORICO: erro ao consultar: {type(erro).__name__}")
+        return False
+    finally:
+        if conexao:
+            conexao.close()
+
+
+def registrar_produto_enviado(produto_id):
+    produto_id = str(produto_id or "").strip()
+    if not produto_id:
+        return False
+
+    PRODUTOS_JA_ENVIADOS.add(produto_id)
+
+    if not preparar_banco():
+        return False
+
+    conexao = None
+    try:
+        conexao = conectar_banco()
+        with conexao.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO produtos_enviados (produto_id, enviado_em)
+                VALUES (%s, NOW())
+                ON CONFLICT (produto_id) DO NOTHING
+                """,
+                (produto_id,)
+            )
+        conexao.commit()
+        print(f"HISTORICO: produto {produto_id} salvo no banco.")
+        return True
+    except Exception as erro:
+        print(f"HISTORICO: erro ao salvar: {type(erro).__name__}")
+        return False
+    finally:
+        if conexao:
+            conexao.close()
 
 
 def telegram_api(metodo, payload):
