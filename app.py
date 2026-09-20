@@ -4,6 +4,7 @@ import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
 import threading
+import psycopg2
 
 app = Flask(__name__)
 
@@ -13,6 +14,7 @@ TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
 TELEGRAM_CHANNEL_ID = os.environ.get("TELEGRAM_CHANNEL_ID", "@TNBofertasMercadoLivreBR").strip()
 CRON_SECRET = os.environ.get("CRON_SECRET", "").strip()
+DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
 
 BASE_URL = "https://ofertas-mercado-livre-bot.onrender.com"
 REDIRECT_URI = f"{BASE_URL}/oauth/callback"
@@ -20,6 +22,8 @@ WEBHOOK_URL = f"{BASE_URL}/telegram/webhook"
 
 ML_ACCESS_TOKEN = None
 ML_REFRESH_TOKEN = None
+ML_TOKEN_EXPIRES_AT = 0
+TOKEN_LOCK = threading.Lock()
 
 OFERTAS = {}
 AGUARDANDO_LINK = {}
@@ -71,6 +75,193 @@ TERMOS_CATEGORIAS = [
     "parafusadeira",
     "furadeira",
 ]
+
+
+
+def conectar_banco():
+    if not DATABASE_URL:
+        return None
+
+    return psycopg2.connect(
+        DATABASE_URL,
+        connect_timeout=10,
+        sslmode="require"
+    )
+
+
+def preparar_banco():
+    if not DATABASE_URL:
+        return False
+
+    conexao = None
+    try:
+        conexao = conectar_banco()
+        with conexao.cursor() as cursor:
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS ml_tokens (
+                    id INTEGER PRIMARY KEY,
+                    access_token TEXT NOT NULL,
+                    refresh_token TEXT NOT NULL,
+                    expires_at DOUBLE PRECISION NOT NULL,
+                    updated_at TIMESTAMPTZ DEFAULT NOW()
+                )
+            """)
+        conexao.commit()
+        return True
+    except Exception as erro:
+        print(f"BANCO: erro ao preparar: {type(erro).__name__}")
+        return False
+    finally:
+        if conexao:
+            conexao.close()
+
+
+def salvar_tokens(access_token, refresh_token, expires_in):
+    global ML_ACCESS_TOKEN, ML_REFRESH_TOKEN, ML_TOKEN_EXPIRES_AT
+
+    if not access_token or not refresh_token:
+        return False
+
+    try:
+        segundos = int(expires_in or 21600)
+    except (TypeError, ValueError):
+        segundos = 21600
+
+    # Renova um pouco antes do vencimento.
+    expires_at = time.time() + max(segundos - 120, 60)
+
+    ML_ACCESS_TOKEN = access_token
+    ML_REFRESH_TOKEN = refresh_token
+    ML_TOKEN_EXPIRES_AT = expires_at
+
+    if not preparar_banco():
+        return False
+
+    conexao = None
+    try:
+        conexao = conectar_banco()
+        with conexao.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO ml_tokens
+                    (id, access_token, refresh_token, expires_at, updated_at)
+                VALUES
+                    (1, %s, %s, %s, NOW())
+                ON CONFLICT (id)
+                DO UPDATE SET
+                    access_token = EXCLUDED.access_token,
+                    refresh_token = EXCLUDED.refresh_token,
+                    expires_at = EXCLUDED.expires_at,
+                    updated_at = NOW()
+                """,
+                (access_token, refresh_token, expires_at)
+            )
+        conexao.commit()
+        print("TOKENS ML: salvos com seguranca no banco.")
+        return True
+    except Exception as erro:
+        print(f"BANCO: erro ao salvar tokens: {type(erro).__name__}")
+        return False
+    finally:
+        if conexao:
+            conexao.close()
+
+
+def carregar_tokens():
+    global ML_ACCESS_TOKEN, ML_REFRESH_TOKEN, ML_TOKEN_EXPIRES_AT
+
+    if not preparar_banco():
+        return False
+
+    conexao = None
+    try:
+        conexao = conectar_banco()
+        with conexao.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT access_token, refresh_token, expires_at
+                FROM ml_tokens
+                WHERE id = 1
+                """
+            )
+            linha = cursor.fetchone()
+
+        if not linha:
+            return False
+
+        ML_ACCESS_TOKEN = linha[0]
+        ML_REFRESH_TOKEN = linha[1]
+        ML_TOKEN_EXPIRES_AT = float(linha[2] or 0)
+        return True
+    except Exception as erro:
+        print(f"BANCO: erro ao carregar tokens: {type(erro).__name__}")
+        return False
+    finally:
+        if conexao:
+            conexao.close()
+
+
+def renovar_token_ml():
+    global ML_ACCESS_TOKEN, ML_REFRESH_TOKEN, ML_TOKEN_EXPIRES_AT
+
+    if not ML_REFRESH_TOKEN:
+        return False
+
+    try:
+        resposta = requests.post(
+            "https://api.mercadolibre.com/oauth/token",
+            data={
+                "grant_type": "refresh_token",
+                "client_id": CLIENT_ID,
+                "client_secret": CLIENT_SECRET,
+                "refresh_token": ML_REFRESH_TOKEN
+            },
+            timeout=20
+        )
+    except requests.RequestException:
+        print("TOKEN ML: falha de conexao ao renovar.")
+        return False
+
+    if resposta.status_code != 200:
+        print(f"TOKEN ML: renovacao falhou HTTP {resposta.status_code}.")
+        return False
+
+    try:
+        dados = resposta.json()
+    except ValueError:
+        return False
+
+    novo_access = dados.get("access_token")
+    novo_refresh = dados.get("refresh_token")
+    expires_in = dados.get("expires_in", 21600)
+
+    if not novo_access or not novo_refresh:
+        return False
+
+    # O Mercado Livre entrega um NOVO refresh token a cada renovacao.
+    # Ele precisa ser salvo imediatamente, pois somente o ultimo e valido.
+    if not salvar_tokens(novo_access, novo_refresh, expires_in):
+        print("TOKEN ML: renovado, mas nao foi possivel persistir.")
+        return False
+
+    print("TOKEN ML: renovado automaticamente.")
+    return True
+
+
+def garantir_token_ml():
+    global ML_ACCESS_TOKEN, ML_REFRESH_TOKEN, ML_TOKEN_EXPIRES_AT
+
+    with TOKEN_LOCK:
+        if not ML_ACCESS_TOKEN or not ML_REFRESH_TOKEN:
+            carregar_tokens()
+
+        if not ML_ACCESS_TOKEN or not ML_REFRESH_TOKEN:
+            return False
+
+        if time.time() < ML_TOKEN_EXPIRES_AT:
+            return True
+
+        return renovar_token_ml()
 
 
 def telegram_api(metodo, payload):
@@ -175,7 +366,7 @@ def login():
 
 @app.route("/oauth/callback")
 def oauth_callback():
-    global ML_ACCESS_TOKEN, ML_REFRESH_TOKEN
+    global ML_ACCESS_TOKEN, ML_REFRESH_TOKEN, ML_TOKEN_EXPIRES_AT
 
     code = request.args.get("code")
 
@@ -206,8 +397,18 @@ def oauth_callback():
 
     dados = resposta.json()
 
-    ML_ACCESS_TOKEN = dados.get("access_token")
-    ML_REFRESH_TOKEN = dados.get("refresh_token")
+    novo_access = dados.get("access_token")
+    novo_refresh = dados.get("refresh_token")
+    expires_in = dados.get("expires_in", 21600)
+
+    if not novo_access or not novo_refresh:
+        return "Tokens do Mercado Livre nao recebidos."
+
+    if not salvar_tokens(novo_access, novo_refresh, expires_in):
+        return (
+            "Mercado Livre autorizou, mas o banco persistente ainda "
+            "nao esta configurado corretamente."
+        )
 
     print(
         "OAUTH TOKEN RECEBIDO. "
@@ -737,7 +938,8 @@ def encontrar_mais_vendido(headers):
 @app.route("/status")
 def status():
     return {
-        "mercado_livre_conectado": bool(ML_ACCESS_TOKEN),
+        "mercado_livre_conectado": bool(ML_ACCESS_TOKEN or ML_REFRESH_TOKEN),
+        "banco_configurado": bool(DATABASE_URL),
         "client_id_configurado": bool(CLIENT_ID),
         "client_secret_configurado": bool(CLIENT_SECRET),
         "telegram_configurado": bool(TELEGRAM_BOT_TOKEN),
@@ -758,15 +960,18 @@ def cron_buscar_oferta():
     if autorizacao != esperado:
         return "Nao autorizado.", 401
 
-    if not ML_ACCESS_TOKEN:
-        return "Mercado Livre precisa ser reconectado.", 503
+    if not garantir_token_ml():
+        return "ML_AUTH_REQUIRED", 503
 
-    return buscar_mais_vendidos()
+    # A funcao envia a oferta ao Telegram. O cron recebe somente
+    # uma resposta curta para evitar "saida muito grande".
+    buscar_mais_vendidos()
+    return "OK", 200
 
 
 @app.route("/buscar-mais-vendidos")
 def buscar_mais_vendidos():
-    if not ML_ACCESS_TOKEN:
+    if not garantir_token_ml():
         return """
         <h3>Conecte o Mercado Livre primeiro.</h3>
         <p><a href="/login">Conectar Mercado Livre</a></p>
@@ -1340,8 +1545,7 @@ def iniciar_busca_automatica():
     print("BUSCA AUTOMATICA: iniciada, intervalo de 1 hora.")
 
 
-# Inicia a rotina ao carregar o serviço.
-iniciar_busca_automatica()
+# Agendamento externo (cron-job.org) e usado no lugar do loop interno.
 
 
 if __name__ == "__main__":
