@@ -155,6 +155,15 @@ def preparar_banco():
                     enviado_em TIMESTAMPTZ DEFAULT NOW()
                 )
             """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS historico_diversidade (
+                    id BIGSERIAL PRIMARY KEY,
+                    tipo_produto TEXT,
+                    marca TEXT,
+                    nome TEXT,
+                    enviado_em TIMESTAMPTZ DEFAULT NOW()
+                )
+            """)
         conexao.commit()
         return True
     except Exception as erro:
@@ -966,6 +975,158 @@ def converter_user_product(user_product_id, headers):
 
     return None
 
+MARCAS_CONHECIDAS = [
+    "samsung", "apple", "iphone", "motorola", "xiaomi", "realme", "asus",
+    "lenovo", "acer", "dell", "lg", "philips", "electrolux", "brastemp",
+    "consul", "mondial", "oster", "britania", "logitech", "hyperx",
+    "redragon", "razer", "corsair", "jbl", "sony", "nivea", "loreal",
+    "l'oréal", "maybelline", "wella", "eudora", "natura", "avon",
+]
+
+TIPOS_PRODUTO = [
+    ("painel_tv", ["painel para tv", "painel de tv", "painel tv", "painel suspenso"]),
+    ("rack_tv", ["rack para tv", "rack tv", "rack com"]),
+    ("guarda_roupa", ["guarda roupa", "guarda-roupa"]),
+    ("sofa", ["sofa", "sofá"]),
+    ("mesa", ["mesa de jantar", "mesa centro", "mesa de centro"]),
+    ("cadeira", ["cadeira escritorio", "cadeira de escritorio", "cadeira gamer", "cadeira"]),
+    ("escrivaninha", ["escrivaninha"]),
+    ("cama", ["cama box", "cama casal", "cama solteiro"]),
+    ("colchao", ["colchao", "colchão"]),
+    ("estante", ["estante"]),
+    ("sapateira", ["sapateira"]),
+    ("poltrona", ["poltrona"]),
+    ("armario", ["armario", "armário"]),
+    ("luminaria", ["luminaria", "luminária"]),
+    ("smartphone", ["iphone", "smartphone", "celular"]),
+    ("notebook", ["notebook", "laptop"]),
+    ("smart_tv", ["smart tv", "televisor", " tv "] ),
+    ("headset", ["headset"]),
+    ("mouse", ["mouse gamer", "mouse sem fio"]),
+    ("teclado", ["teclado gamer", "teclado mecanico", "teclado mecânico"]),
+    ("monitor", ["monitor gamer", "monitor "] ),
+    ("controle_gamer", ["controle gamer", "gamepad"]),
+    ("video_game", ["playstation", "xbox", "nintendo switch", "video game"]),
+    ("perfume", ["perfume"]),
+    ("maquiagem", ["maquiagem", "batom", "mascara de cilios", "máscara de cílios", "base facial"]),
+    ("skincare", ["skincare", "serum facial", "sérum facial", "creme facial"]),
+    ("cabelo", ["secador de cabelo", "chapinha", "modelador de cabelo"]),
+    ("tenis", ["tenis", "tênis"]),
+    ("bolsa", ["bolsa feminina", "bolsa "] ),
+    ("air_fryer", ["air fryer", "fritadeira eletrica", "fritadeira elétrica"]),
+    ("aspirador", ["aspirador"]),
+    ("cafeteira", ["cafeteira"]),
+    ("liquidificador", ["liquidificador"]),
+    ("microondas", ["microondas", "micro-ondas"]),
+    ("ventilador", ["ventilador"]),
+    ("geladeira", ["geladeira", "refrigerador"]),
+]
+
+
+def identificar_marca(nome):
+    texto = f" {str(nome or '').lower()} "
+    for marca in MARCAS_CONHECIDAS:
+        if marca in texto:
+            return "apple" if marca == "iphone" else marca.replace("l'oréal", "loreal")
+    return ""
+
+
+def identificar_tipo(nome, termo_busca=""):
+    texto = f" {str(nome or '').lower()} "
+    for tipo, palavras in TIPOS_PRODUTO:
+        if any(palavra in texto for palavra in palavras):
+            return tipo
+    # Se o titulo nao revelar um tipo conhecido, usa o termo que originou a busca.
+    termo = str(termo_busca or "").strip().lower().replace(" ", "_")
+    return termo[:80]
+
+
+def historico_diversidade_recente(limite=8):
+    if not preparar_banco():
+        return []
+    conexao = None
+    try:
+        conexao = conectar_banco()
+        with conexao.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT tipo_produto, marca, nome
+                FROM historico_diversidade
+                ORDER BY enviado_em DESC, id DESC
+                LIMIT %s
+                """,
+                (limite,),
+            )
+            return cursor.fetchall() or []
+    except Exception as erro:
+        print(f"DIVERSIDADE: erro ao ler historico: {type(erro).__name__}")
+        return []
+    finally:
+        if conexao:
+            conexao.close()
+
+
+def oferta_repetitiva(oferta, historico):
+    nome = oferta.get("nome") or ""
+    tipo = identificar_tipo(nome, oferta.get("categoria_busca"))
+    marca = identificar_marca(nome)
+    oferta["tipo_produto"] = tipo
+    oferta["marca_detectada"] = marca
+
+    # Nao repete o mesmo tipo nas 3 ofertas mais recentes.
+    tipos_recentes = [str(linha[0] or "") for linha in historico[:3]]
+    if tipo and tipo in tipos_recentes:
+        print(f"DIVERSIDADE: pulando tipo repetido: {tipo} | {nome[:80]}")
+        return True
+
+    # Nao repete a mesma marca nas 2 ofertas mais recentes, quando detectavel.
+    marcas_recentes = [str(linha[1] or "") for linha in historico[:2]]
+    if marca and marca in marcas_recentes:
+        print(f"DIVERSIDADE: pulando marca repetida: {marca} | {nome[:80]}")
+        return True
+
+    return False
+
+
+def registrar_diversidade(oferta):
+    if not preparar_banco():
+        return False
+    nome = oferta.get("nome") or ""
+    tipo = oferta.get("tipo_produto") or identificar_tipo(nome, oferta.get("categoria_busca"))
+    marca = oferta.get("marca_detectada") or identificar_marca(nome)
+    conexao = None
+    try:
+        conexao = conectar_banco()
+        with conexao.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO historico_diversidade (tipo_produto, marca, nome, enviado_em)
+                VALUES (%s, %s, %s, NOW())
+                """,
+                (tipo, marca, nome[:500]),
+            )
+            # Mantem apenas um historico curto para a tabela nao crescer sem necessidade.
+            cursor.execute(
+                """
+                DELETE FROM historico_diversidade
+                WHERE id NOT IN (
+                    SELECT id FROM historico_diversidade
+                    ORDER BY enviado_em DESC, id DESC
+                    LIMIT 50
+                )
+                """
+            )
+        conexao.commit()
+        print(f"DIVERSIDADE: registrado tipo={tipo} marca={marca or 'sem_marca'}")
+        return True
+    except Exception as erro:
+        print(f"DIVERSIDADE: erro ao registrar: {type(erro).__name__}")
+        return False
+    finally:
+        if conexao:
+            conexao.close()
+
+
 def encontrar_mais_vendido(headers):
     """Busca curta: no maximo ~12 segundos, sem USER_PRODUCT lento."""
     inicio = time.monotonic()
@@ -984,6 +1145,7 @@ def encontrar_mais_vendido(headers):
     ]
 
     print(f"CATEGORIAS DESTA BUSCA: {termos_busca}")
+    historico = historico_diversidade_recente(8)
 
     for termo in termos_busca:
         if time.monotonic() - inicio >= limite_segundos:
@@ -1043,6 +1205,8 @@ def encontrar_mais_vendido(headers):
 
                     oferta = futuro.result()
                     if oferta:
+                        if oferta_repetitiva(oferta, historico):
+                            continue
                         for f in futuros:
                             f.cancel()
                         return oferta
@@ -1222,6 +1386,9 @@ def buscar_mais_vendidos():
             "Erro ao enviar para Telegram. "
             f"Codigo: {telegram.status_code}"
         )
+
+    # So entra no historico de diversidade depois que realmente chegou no Telegram.
+    registrar_diversidade(oferta)
 
     return """
     <h2>OFERTA ENVIADA! 🔥</h2>
