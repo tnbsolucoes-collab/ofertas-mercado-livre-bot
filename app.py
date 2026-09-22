@@ -31,20 +31,70 @@ PRODUTOS_JA_ENVIADOS = set()
 BUSCA_AUTOMATICA_INICIADA = False
 
 TERMOS_CATEGORIAS = [
-    # Eletronicos / tecnologia
-    "smartphone",
+    # Beleza feminina
+    "perfume feminino",
+    "maquiagem",
+    "kit maquiagem",
+    "skincare feminino",
+    "creme facial",
+    "hidratante corporal feminino",
+    "secador de cabelo",
+    "chapinha de cabelo",
+    "modelador de cabelo",
+
+    # Gamer
+    "headset gamer",
+    "mouse gamer",
+    "teclado gamer",
+    "controle gamer",
+    "monitor gamer",
+    "cadeira gamer",
+    "microfone gamer",
+    "ssd gamer",
+    "video game",
+
+    # Tecnologia - celulares com marcas variadas
+    "iphone apple",
+    "celular motorola",
+    "celular xiaomi",
+    "celular samsung",
+    "celular realme",
+    "notebook asus",
+    "notebook lenovo",
+    "notebook acer",
+    "notebook dell",
     "smart tv",
-    "notebook",
     "fone bluetooth",
     "caixa de som bluetooth",
     "smartwatch",
     "tablet",
-    "monitor gamer",
-    "teclado gamer",
-    "mouse gamer",
-    "video game",
 
-    # Casa / eletrodomesticos
+    # Moda
+    "tenis feminino",
+    "tenis masculino",
+    "roupa feminina",
+    "roupa masculina",
+    "jaqueta",
+    "bolsa feminina",
+
+    # Casa / moveis - variedade maior
+    "sofa retratil",
+    "mesa de jantar",
+    "cadeira escritorio",
+    "escrivaninha",
+    "cama box",
+    "colchao",
+    "criado mudo",
+    "estante",
+    "sapateira",
+    "poltrona",
+    "mesa de centro",
+    "armario de cozinha",
+    "rack para tv",
+    "guarda roupa",
+    "luminaria decorativa",
+
+    # Eletrodomesticos
     "air fryer",
     "aspirador de po",
     "cafeteira",
@@ -54,27 +104,20 @@ TERMOS_CATEGORIAS = [
     "maquina de lavar",
     "geladeira",
 
-    # Moveis / casa
-    "sofa",
-    "guarda roupa",
-    "mesa de jantar",
-    "cadeira escritorio",
-    "colchao",
-    "rack para tv",
-
-    # Moda
-    "tenis",
-    "roupa feminina",
-    "roupa masculina",
-    "jaqueta",
-    "bolsa feminina",
-
-    # Beleza / ferramentas
-    "perfume",
-    "secador de cabelo",
-    "parafusadeira",
-    "furadeira",
+    # Bem-estar / produtos naturais (sem medicamentos controlados)
+    "produto natural",
+    "cha natural",
+    "oleo essencial",
+    "vitaminas",
+    "suplemento alimentar",
+    "cuidados pessoais",
 ]
+
+# Evita que buscas consecutivas caiam sempre na mesma marca/tipo.
+# E apenas memoria temporaria do processo: nao altera OAuth, banco, cron,
+# aprovacao, link de afiliado ou publicacao no canal.
+ULTIMAS_CATEGORIAS_BUSCADAS = []
+
 
 
 
@@ -928,11 +971,15 @@ def encontrar_mais_vendido(headers):
     inicio = time.monotonic()
     limite_segundos = 12
 
-    # Rotaciona as categorias para nao mandar sempre smartphone.
+    # Rotaciona termos distantes entre si para aumentar a diversidade.
+    # A cada execucao, o ponto inicial avanca; os 3 termos testados ficam
+    # separados na lista para reduzir repeticao de marca/tipo.
     quantidade = 3
-    inicio_rotacao = int(time.time() // 300) % len(TERMOS_CATEGORIAS)
+    total = len(TERMOS_CATEGORIAS)
+    inicio_rotacao = int(time.time() // 300) % total
+    passo = max(total // quantidade, 1)
     termos_busca = [
-        TERMOS_CATEGORIAS[(inicio_rotacao + i) % len(TERMOS_CATEGORIAS)]
+        TERMOS_CATEGORIAS[(inicio_rotacao + (i * passo)) % total]
         for i in range(quantidade)
     ]
 
