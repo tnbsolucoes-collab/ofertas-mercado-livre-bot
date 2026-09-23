@@ -1060,6 +1060,63 @@ def obter_proximo_grupo():
             conexao.close()
 
 
+def oferta_compativel_com_grupo(oferta):
+    """Valida apenas grupos que precisam de correspondencia forte com o titulo real.
+
+    No grupo gamer, evita aceitar produtos comuns apenas porque o ranking da busca
+    veio de um termo como "teclado gamer" ou "headset gamer". O titulo real
+    precisa indicar que o produto e gamer/gaming ou pertencer a uma linha gamer
+    reconhecivel. Nao altera o nome original do Mercado Livre.
+    """
+    grupo = str(oferta.get("grupo_rotacao") or "").lower()
+    if grupo != "gamer":
+        return True
+
+    nome = str(oferta.get("nome") or "").lower()
+    termo = str(oferta.get("categoria_busca") or "").lower()
+
+    # Consoles/videogames sao aceitos pela propria identidade do produto.
+    sinais_console = [
+        "playstation", "ps4", "ps5", "xbox", "nintendo switch",
+        "video game", "videogame", "gamepad", "controle gamer",
+    ]
+    if any(sinal in nome for sinal in sinais_console):
+        return True
+
+    # Indicacao explicita no titulo e o sinal mais seguro.
+    if "gamer" in nome or "gaming" in nome:
+        return True
+
+    # Linhas/marcas muito associadas a perifericos gamer. A marca so vale quando
+    # o produto tambem e um periferico do grupo, evitando classificar qualquer
+    # item da marca como gamer.
+    marcas_gamer = [
+        "redragon", "hyperx", "razer", "corsair", "steelseries",
+        "husky gaming", "pichau gaming", "mancer", "fallen",
+    ]
+    perifericos = [
+        "teclado", "mouse", "headset", "fone", "monitor", "cadeira",
+        "microfone", "controle", "gamepad", "ssd",
+    ]
+    if any(marca in nome for marca in marcas_gamer) and any(p in nome for p in perifericos):
+        return True
+
+    # Logitech tem linhas comuns e gamer; exige indicacao de linha G/PRO gamer
+    # ou a palavra gamer/gaming (ja tratada acima).
+    if "logitech" in nome and any(p in nome for p in perifericos):
+        linhas_logitech_g = [
+            " g203", " g305", " g403", " g502", " g703", " g903",
+            " g213", " g413", " g512", " g515", " g613", " g715", " g915",
+            " g332", " g335", " g432", " g435", " g535", " g733", " g935",
+            "pro x", "pro 2 lightspeed", "lightspeed gaming",
+        ]
+        if any(linha in f" {nome}" for linha in linhas_logitech_g):
+            return True
+
+    print(f"FILTRO GAMER: rejeitado termo={termo} titulo={nome[:100]}")
+    return False
+
+
 def oferta_repetitiva(oferta, historico):
     nome = oferta.get("nome") or ""
     tipo = identificar_tipo(nome, oferta.get("categoria_busca"))
@@ -1218,6 +1275,8 @@ def encontrar_mais_vendido(headers):
                             break
                         oferta = futuro.result()
                         if not oferta:
+                            continue
+                        if not oferta_compativel_com_grupo(oferta):
                             continue
                         if oferta_repetitiva(oferta, historico):
                             continue
