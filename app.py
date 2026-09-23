@@ -955,7 +955,9 @@ MARCAS_CONHECIDAS = [
     "samsung", "apple", "iphone", "motorola", "xiaomi", "realme", "asus",
     "lenovo", "acer", "dell", "lg", "philips", "electrolux", "brastemp",
     "consul", "mondial", "oster", "britania", "logitech", "hyperx",
-    "redragon", "razer", "corsair", "jbl", "sony", "nivea", "loreal",
+    "redragon", "razer", "corsair", "steelseries", "cooler master", "attack shark",
+    "havit", "fortrek", "delux", "ajazz", "rapoo", "darmoshark", "lamzu",
+    "pulsar", "jbl", "sony", "nivea", "loreal",
     "l'oréal", "maybelline", "wella", "eudora", "natura", "avon",
 ]
 
@@ -1092,6 +1094,8 @@ def oferta_compativel_com_grupo(oferta):
     # item da marca como gamer.
     marcas_gamer = [
         "redragon", "hyperx", "razer", "corsair", "steelseries",
+        "cooler master", "attack shark", "havit", "fortrek", "delux",
+        "ajazz", "rapoo", "darmoshark", "lamzu", "pulsar",
         "husky gaming", "pichau gaming", "mancer", "fallen",
     ]
     perifericos = [
@@ -1132,10 +1136,27 @@ def oferta_repetitiva(oferta, historico):
         print(f"DIVERSIDADE: pulando tipo repetido no grupo {grupo}: {tipo} | {nome[:80]}")
         return True
 
-    # Marca tambem nao deve dominar as voltas recentes.
-    marcas_recentes = [str(linha[1] or "") for linha in historico[:3]]
+    # A marca deve variar DENTRO DO MESMO TIPO de produto.
+    # Ex.: se o ultimo mouse foi Redragon, o proximo mouse tenta Logitech,
+    # Razer, HyperX, Attack Shark etc., mesmo que entre eles tenham passado
+    # ofertas de outras categorias. Isso evita uma unica marca dominar um subtipo.
+    historico_mesmo_tipo = [
+        linha for linha in historico
+        if str(linha[0] or "") == tipo and str(linha[1] or "")
+    ]
+    marcas_mesmo_tipo_recentes = [str(linha[1] or "") for linha in historico_mesmo_tipo[:3]]
+    if marca and marca in marcas_mesmo_tipo_recentes:
+        print(
+            f"DIVERSIDADE: pulando marca repetida no tipo {tipo}: "
+            f"{marca} | {nome[:80]}"
+        )
+        return True
+
+    # Mantem tambem uma protecao curta global para nao mandar a mesma marca
+    # em duas ofertas praticamente seguidas de tipos diferentes.
+    marcas_recentes = [str(linha[1] or "") for linha in historico[:2]]
     if marca and marca in marcas_recentes:
-        print(f"DIVERSIDADE: pulando marca repetida: {marca} | {nome[:80]}")
+        print(f"DIVERSIDADE: pulando marca repetida recente: {marca} | {nome[:80]}")
         return True
 
     return False
