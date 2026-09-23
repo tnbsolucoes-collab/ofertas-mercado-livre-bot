@@ -30,88 +30,44 @@ AGUARDANDO_LINK = {}
 PRODUTOS_JA_ENVIADOS = set()
 BUSCA_AUTOMATICA_INICIADA = False
 
-TERMOS_CATEGORIAS = [
-    # Beleza feminina
-    "perfume feminino",
-    "maquiagem",
-    "kit maquiagem",
-    "skincare feminino",
-    "creme facial",
-    "hidratante corporal feminino",
-    "secador de cabelo",
-    "chapinha de cabelo",
-    "modelador de cabelo",
-
-    # Gamer
-    "headset gamer",
-    "mouse gamer",
-    "teclado gamer",
-    "controle gamer",
-    "monitor gamer",
-    "cadeira gamer",
-    "microfone gamer",
-    "ssd gamer",
-    "video game",
-
-    # Tecnologia - celulares com marcas variadas
-    "iphone apple",
-    "celular motorola",
-    "celular xiaomi",
-    "celular samsung",
-    "celular realme",
-    "notebook asus",
-    "notebook lenovo",
-    "notebook acer",
-    "notebook dell",
-    "smart tv",
-    "fone bluetooth",
-    "caixa de som bluetooth",
-    "smartwatch",
-    "tablet",
-
-    # Moda
-    "tenis feminino",
-    "tenis masculino",
-    "roupa feminina",
-    "roupa masculina",
-    "jaqueta",
-    "bolsa feminina",
-
-    # Casa / moveis - variedade maior
-    "sofa retratil",
-    "mesa de jantar",
-    "cadeira escritorio",
-    "escrivaninha",
-    "cama box",
-    "colchao",
-    "criado mudo",
-    "estante",
-    "sapateira",
-    "poltrona",
-    "mesa de centro",
-    "armario de cozinha",
-    "rack para tv",
-    "guarda roupa",
-    "luminaria decorativa",
-
-    # Eletrodomesticos
-    "air fryer",
-    "aspirador de po",
-    "cafeteira",
-    "liquidificador",
-    "microondas",
-    "ventilador",
-    "maquina de lavar",
-    "geladeira",
-
-    # Bem-estar / produtos naturais (sem medicamentos controlados)
-    "produto natural",
-    "cha natural",
-    "oleo essencial",
-    "vitaminas",
-    "suplemento alimentar",
-    "cuidados pessoais",
+GRUPOS_ROTACAO = [
+    ("casa", [
+        "sofa retratil", "mesa de jantar", "cadeira escritorio", "escrivaninha",
+        "cama box", "colchao", "criado mudo", "estante", "sapateira", "poltrona",
+        "mesa de centro", "armario de cozinha", "rack para tv", "guarda roupa",
+        "luminaria decorativa",
+    ]),
+    ("gamer", [
+        "teclado gamer", "headset gamer", "mouse gamer", "controle gamer",
+        "monitor gamer", "cadeira gamer", "microfone gamer", "ssd gamer", "video game",
+    ]),
+    ("beleza", [
+        "perfume feminino", "maquiagem", "kit maquiagem", "skincare feminino",
+        "creme facial", "hidratante corporal feminino", "secador de cabelo",
+        "chapinha de cabelo", "modelador de cabelo",
+    ]),
+    ("moda", [
+        "tenis feminino", "tenis masculino", "roupa feminina", "roupa masculina",
+        "jaqueta", "bolsa feminina",
+    ]),
+    ("tecnologia", [
+        "iphone apple", "celular motorola", "celular xiaomi", "celular samsung",
+        "celular realme", "notebook asus", "notebook lenovo", "notebook acer",
+        "notebook dell", "smart tv", "fone bluetooth", "caixa de som bluetooth",
+        "smartwatch", "tablet",
+    ]),
+    ("bem_estar", [
+        "produto natural", "cha natural", "oleo essencial", "vitaminas",
+        "suplemento alimentar", "cuidados pessoais",
+    ]),
+    ("eletro", [
+        "air fryer", "aspirador de po", "cafeteira", "liquidificador", "microondas",
+        "ventilador", "maquina de lavar", "geladeira",
+    ]),
 ]
+
+# Mantida apenas por compatibilidade com qualquer trecho antigo que consulte a lista.
+TERMOS_CATEGORIAS = [termo for _, termos in GRUPOS_ROTACAO for termo in termos]
 
 # Evita que buscas consecutivas caiam sempre na mesma marca/tipo.
 # E apenas memoria temporaria do processo: nao altera OAuth, banco, cron,
@@ -163,6 +119,26 @@ def preparar_banco():
                     nome TEXT,
                     enviado_em TIMESTAMPTZ DEFAULT NOW()
                 )
+            """)
+            cursor.execute("""
+                ALTER TABLE historico_diversidade
+                ADD COLUMN IF NOT EXISTS grupo_rotacao TEXT
+            """)
+            cursor.execute("""
+                ALTER TABLE historico_diversidade
+                ADD COLUMN IF NOT EXISTS termo_busca TEXT
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS estado_rotacao (
+                    id INTEGER PRIMARY KEY,
+                    proximo_grupo INTEGER NOT NULL DEFAULT 0,
+                    updated_at TIMESTAMPTZ DEFAULT NOW()
+                )
+            """)
+            cursor.execute("""
+                INSERT INTO estado_rotacao (id, proximo_grupo)
+                VALUES (1, 0)
+                ON CONFLICT (id) DO NOTHING
             """)
         conexao.commit()
         return True
@@ -1041,7 +1017,7 @@ def identificar_tipo(nome, termo_busca=""):
     return termo[:80]
 
 
-def historico_diversidade_recente(limite=8):
+def historico_diversidade_recente(limite=30):
     if not preparar_banco():
         return []
     conexao = None
@@ -1050,7 +1026,7 @@ def historico_diversidade_recente(limite=8):
         with conexao.cursor() as cursor:
             cursor.execute(
                 """
-                SELECT tipo_produto, marca, nome
+                SELECT tipo_produto, marca, nome, grupo_rotacao, termo_busca
                 FROM historico_diversidade
                 ORDER BY enviado_em DESC, id DESC
                 LIMIT %s
@@ -1066,6 +1042,24 @@ def historico_diversidade_recente(limite=8):
             conexao.close()
 
 
+def obter_proximo_grupo():
+    if not preparar_banco():
+        return 0
+    conexao = None
+    try:
+        conexao = conectar_banco()
+        with conexao.cursor() as cursor:
+            cursor.execute("SELECT proximo_grupo FROM estado_rotacao WHERE id = 1")
+            linha = cursor.fetchone()
+            return int((linha or [0])[0] or 0) % len(GRUPOS_ROTACAO)
+    except Exception as erro:
+        print(f"ROTACAO: erro ao ler estado: {type(erro).__name__}")
+        return 0
+    finally:
+        if conexao:
+            conexao.close()
+
+
 def oferta_repetitiva(oferta, historico):
     nome = oferta.get("nome") or ""
     tipo = identificar_tipo(nome, oferta.get("categoria_busca"))
@@ -1073,14 +1067,16 @@ def oferta_repetitiva(oferta, historico):
     oferta["tipo_produto"] = tipo
     oferta["marca_detectada"] = marca
 
-    # Nao repete o mesmo tipo nas 3 ofertas mais recentes.
-    tipos_recentes = [str(linha[0] or "") for linha in historico[:3]]
-    if tipo and tipo in tipos_recentes:
-        print(f"DIVERSIDADE: pulando tipo repetido: {tipo} | {nome[:80]}")
+    # Dentro do grupo atual, evita repetir o mesmo tipo usado nas ultimas voltas.
+    grupo = oferta.get("grupo_rotacao") or ""
+    historico_grupo = [linha for linha in historico if str(linha[3] or "") == grupo]
+    tipos_grupo = [str(linha[0] or "") for linha in historico_grupo[:3]]
+    if tipo and tipo in tipos_grupo:
+        print(f"DIVERSIDADE: pulando tipo repetido no grupo {grupo}: {tipo} | {nome[:80]}")
         return True
 
-    # Nao repete a mesma marca nas 2 ofertas mais recentes, quando detectavel.
-    marcas_recentes = [str(linha[1] or "") for linha in historico[:2]]
+    # Marca tambem nao deve dominar as voltas recentes.
+    marcas_recentes = [str(linha[1] or "") for linha in historico[:3]]
     if marca and marca in marcas_recentes:
         print(f"DIVERSIDADE: pulando marca repetida: {marca} | {nome[:80]}")
         return True
@@ -1094,30 +1090,44 @@ def registrar_diversidade(oferta):
     nome = oferta.get("nome") or ""
     tipo = oferta.get("tipo_produto") or identificar_tipo(nome, oferta.get("categoria_busca"))
     marca = oferta.get("marca_detectada") or identificar_marca(nome)
+    grupo = oferta.get("grupo_rotacao") or ""
+    termo = oferta.get("categoria_busca") or ""
+    indice_grupo = int(oferta.get("indice_grupo_rotacao", 0))
+    proximo = (indice_grupo + 1) % len(GRUPOS_ROTACAO)
     conexao = None
     try:
         conexao = conectar_banco()
         with conexao.cursor() as cursor:
             cursor.execute(
                 """
-                INSERT INTO historico_diversidade (tipo_produto, marca, nome, enviado_em)
-                VALUES (%s, %s, %s, NOW())
+                INSERT INTO historico_diversidade
+                    (tipo_produto, marca, nome, grupo_rotacao, termo_busca, enviado_em)
+                VALUES (%s, %s, %s, %s, %s, NOW())
                 """,
-                (tipo, marca, nome[:500]),
+                (tipo, marca, nome[:500], grupo, termo),
             )
-            # Mantem apenas um historico curto para a tabela nao crescer sem necessidade.
+            cursor.execute(
+                """
+                INSERT INTO estado_rotacao (id, proximo_grupo, updated_at)
+                VALUES (1, %s, NOW())
+                ON CONFLICT (id) DO UPDATE SET
+                    proximo_grupo = EXCLUDED.proximo_grupo,
+                    updated_at = NOW()
+                """,
+                (proximo,),
+            )
             cursor.execute(
                 """
                 DELETE FROM historico_diversidade
                 WHERE id NOT IN (
                     SELECT id FROM historico_diversidade
                     ORDER BY enviado_em DESC, id DESC
-                    LIMIT 50
+                    LIMIT 100
                 )
                 """
             )
         conexao.commit()
-        print(f"DIVERSIDADE: registrado tipo={tipo} marca={marca or 'sem_marca'}")
+        print(f"ROTACAO: registrado grupo={grupo} tipo={tipo} marca={marca or 'sem_marca'}; proximo={GRUPOS_ROTACAO[proximo][0]}")
         return True
     except Exception as erro:
         print(f"DIVERSIDADE: erro ao registrar: {type(erro).__name__}")
@@ -1128,93 +1138,96 @@ def registrar_diversidade(oferta):
 
 
 def encontrar_mais_vendido(headers):
-    """Busca curta: no maximo ~12 segundos, sem USER_PRODUCT lento."""
+    """Busca uma oferta respeitando rotacao rigida de grupos e variedade interna."""
     inicio = time.monotonic()
     limite_segundos = 12
+    historico = historico_diversidade_recente(30)
+    inicio_grupo = obter_proximo_grupo()
 
-    # Rotaciona termos distantes entre si para aumentar a diversidade.
-    # A cada execucao, o ponto inicial avanca; os 3 termos testados ficam
-    # separados na lista para reduzir repeticao de marca/tipo.
-    quantidade = 3
-    total = len(TERMOS_CATEGORIAS)
-    inicio_rotacao = int(time.time() // 300) % total
-    passo = max(total // quantidade, 1)
-    termos_busca = [
-        TERMOS_CATEGORIAS[(inicio_rotacao + (i * passo)) % total]
-        for i in range(quantidade)
-    ]
-
-    print(f"CATEGORIAS DESTA BUSCA: {termos_busca}")
-    historico = historico_diversidade_recente(8)
-
-    for termo in termos_busca:
+    # Tenta primeiro o grupo obrigatorio. Se a API nao devolver nada utilizavel,
+    # pula para o grupo seguinte para nao deixar o cron sem oferta.
+    for deslocamento in range(min(3, len(GRUPOS_ROTACAO))):
         if time.monotonic() - inicio >= limite_segundos:
             return None
 
-        category_id = descobrir_categoria(termo, headers)
-        if not category_id:
-            continue
+        indice_grupo = (inicio_grupo + deslocamento) % len(GRUPOS_ROTACAO)
+        grupo, termos = GRUPOS_ROTACAO[indice_grupo]
 
-        ranking = consultar_ranking(category_id, headers)
-        print(f"RANKING {termo} {category_id}: {len(ranking)} resultados")
+        # Evita o termo usado mais recentemente nesse mesmo grupo.
+        termos_recentes = [
+            str(linha[4] or "") for linha in historico
+            if str(linha[3] or "") == grupo
+        ]
+        termos_ordenados = [t for t in termos if t not in termos_recentes[:4]]
+        termos_ordenados += [t for t in termos if t not in termos_ordenados]
 
-        # Só testa caminhos que podem virar anúncio diretamente.
-        candidatos = []
-        for posicao, entrada in enumerate(ranking[:10], start=1):
-            tipo = str(entrada.get("type") or "").upper()
-            identificador = entrada.get("id")
-            if identificador and tipo in {"ITEM", "PRODUCT"}:
-                candidatos.append((tipo, identificador, posicao))
+        # Testa ate 3 tipos diferentes dentro do grupo atual.
+        termos_busca = termos_ordenados[:3]
+        print(f"ROTACAO GRUPO={grupo} TERMOS={termos_busca}")
 
-        if not candidatos:
-            continue
-
-        def testar(candidato):
-            tipo, identificador, posicao = candidato
+        for termo in termos_busca:
             if time.monotonic() - inicio >= limite_segundos:
                 return None
 
-            try:
-                if tipo == "ITEM":
-                    oferta = consultar_item(identificador, headers)
-                else:
-                    oferta = converter_product(identificador, headers)
-            except Exception as erro:
-                print(f"ERRO candidato {tipo} {identificador}: {erro}")
-                return None
+            category_id = descobrir_categoria(termo, headers)
+            if not category_id:
+                continue
 
-            if not oferta:
-                return None
+            ranking = consultar_ranking(category_id, headers)
+            print(f"RANKING {grupo}/{termo} {category_id}: {len(ranking)} resultados")
 
-            oferta["posicao"] = posicao
-            oferta["categoria_busca"] = termo
-            oferta["tipo_ranking"] = tipo
-            oferta["desconto"] = calcular_desconto(
-                oferta.get("preco_numero"),
-                oferta.get("preco_original"),
-            )
-            return oferta
+            candidatos = []
+            for posicao, entrada in enumerate(ranking[:10], start=1):
+                tipo_ranking = str(entrada.get("type") or "").upper()
+                identificador = entrada.get("id")
+                if identificador and tipo_ranking in {"ITEM", "PRODUCT"}:
+                    candidatos.append((tipo_ranking, identificador, posicao))
 
-        with ThreadPoolExecutor(max_workers=4) as executor:
-            futuros = [executor.submit(testar, c) for c in candidatos[:8]]
+            if not candidatos:
+                continue
 
-            try:
-                for futuro in as_completed(futuros, timeout=8):
-                    if time.monotonic() - inicio >= limite_segundos:
-                        break
+            def testar(candidato):
+                tipo_ranking, identificador, posicao = candidato
+                if time.monotonic() - inicio >= limite_segundos:
+                    return None
+                try:
+                    if tipo_ranking == "ITEM":
+                        oferta = consultar_item(identificador, headers)
+                    else:
+                        oferta = converter_product(identificador, headers)
+                except Exception as erro:
+                    print(f"ERRO candidato {tipo_ranking} {identificador}: {erro}")
+                    return None
+                if not oferta:
+                    return None
+                oferta["posicao"] = posicao
+                oferta["categoria_busca"] = termo
+                oferta["grupo_rotacao"] = grupo
+                oferta["indice_grupo_rotacao"] = indice_grupo
+                oferta["tipo_ranking"] = tipo_ranking
+                oferta["desconto"] = calcular_desconto(
+                    oferta.get("preco_numero"), oferta.get("preco_original")
+                )
+                return oferta
 
-                    oferta = futuro.result()
-                    if oferta:
+            with ThreadPoolExecutor(max_workers=4) as executor:
+                futuros = [executor.submit(testar, c) for c in candidatos[:8]]
+                try:
+                    for futuro in as_completed(futuros, timeout=6):
+                        if time.monotonic() - inicio >= limite_segundos:
+                            break
+                        oferta = futuro.result()
+                        if not oferta:
+                            continue
                         if oferta_repetitiva(oferta, historico):
                             continue
                         for f in futuros:
                             f.cancel()
                         return oferta
-            except TimeoutError:
-                print(f"LIMITE atingido na categoria {termo}")
-
-            for f in futuros:
-                f.cancel()
+                except TimeoutError:
+                    print(f"LIMITE atingido em {grupo}/{termo}")
+                for f in futuros:
+                    f.cancel()
 
     return None
 
