@@ -1197,7 +1197,7 @@ def registrar_diversidade(oferta):
 def encontrar_mais_vendido(headers):
     """Busca uma oferta respeitando rotacao rigida de grupos e variedade interna."""
     inicio = time.monotonic()
-    limite_segundos = 12
+    limite_segundos = 20
     historico = historico_diversidade_recente(30)
     inicio_grupo = obter_proximo_grupo()
 
@@ -1218,8 +1218,10 @@ def encontrar_mais_vendido(headers):
         termos_ordenados = [t for t in termos if t not in termos_recentes[:4]]
         termos_ordenados += [t for t in termos if t not in termos_ordenados]
 
-        # Testa ate 3 tipos diferentes dentro do grupo atual.
-        termos_busca = termos_ordenados[:3]
+        # Gamer recebe mais tentativas porque rankings genericos podem trazer
+        # teclado/fone comum. Nos outros grupos mantemos a busca curta.
+        limite_termos = 7 if grupo == "gamer" else 3
+        termos_busca = termos_ordenados[:limite_termos]
         print(f"ROTACAO GRUPO={grupo} TERMOS={termos_busca}")
 
         for termo in termos_busca:
@@ -1287,6 +1289,12 @@ def encontrar_mais_vendido(headers):
                     print(f"LIMITE atingido em {grupo}/{termo}")
                 for f in futuros:
                     f.cancel()
+
+        # Se Gamer nao encontrou um produto realmente gamer, segue para o
+        # proximo grupo. Assim o cron nao fica preso tentando publicar um
+        # teclado/fone comum como gamer.
+        if grupo == "gamer":
+            print("GAMER: nenhum produto gamer valido; tentando proximo grupo.")
 
     return None
 
