@@ -38,8 +38,15 @@ GRUPOS_ROTACAO = [
         "luminaria decorativa",
     ]),
     ("gamer", [
-        "teclado gamer", "headset gamer", "mouse gamer", "controle gamer",
-        "monitor gamer", "cadeira gamer", "microfone gamer", "ssd gamer", "video game",
+        # Perifericos: alterna tambem a tecnologia dos teclados.
+        "teclado mecanico gamer", "teclado magnetico gamer", "teclado hall effect",
+        "teclado rapid trigger", "teclado gamer rgb", "headset gamer", "mouse gamer",
+        "controle gamer", "monitor gamer", "cadeira gamer", "microfone gamer",
+        # Pecas para PC gamer.
+        "placa de video gamer", "processador gamer", "memoria ram gamer",
+        "ssd nvme gamer", "placa mae gamer", "water cooler gamer",
+        "air cooler gamer", "fonte pc gamer", "gabinete gamer", "fan rgb pc gamer",
+        "kit upgrade pc gamer", "video game",
     ]),
     ("beleza", [
         "perfume feminino", "maquiagem", "kit maquiagem", "skincare feminino",
@@ -981,8 +988,26 @@ TIPOS_PRODUTO = [
     ("smart_tv", ["smart tv", "televisor", " tv "] ),
     ("headset", ["headset"]),
     ("mouse", ["mouse gamer", "mouse sem fio"]),
-    ("teclado", ["teclado gamer", "teclado mecanico", "teclado mecânico"]),
+    # Subtipos de teclado ficam antes do tipo generico para a rotacao distinguir
+    # mecanico, magnetico/Hall Effect e membrana RGB.
+    ("teclado_magnetico", ["teclado magnetico", "teclado magnético", "hall effect", "rapid trigger"]),
+    ("teclado_mecanico", ["teclado mecanico", "teclado mecânico", "switch mecanico", "switch mecânico"]),
+    ("teclado_membrana", ["teclado membrana", "membrana rgb"]),
+    ("teclado", ["teclado gamer", "teclado rgb"]),
     ("monitor", ["monitor gamer", "monitor "] ),
+    # Componentes de PC gamer. Os sinais abaixo ajudam o historico a alternar
+    # entre GPU, CPU, RAM, SSD, placa-mae, refrigeracao, fonte e gabinete.
+    ("gpu", ["placa de video", "placa de vídeo", "geforce rtx", "geforce gtx", "radeon rx"]),
+    ("processador", ["processador", "ryzen 5", "ryzen 7", "ryzen 9", "core i5", "core i7", "core i9"]),
+    ("memoria_ram", ["memoria ram", "memória ram", "ddr4", "ddr5"]),
+    ("ssd_nvme", ["ssd nvme", "nvme m.2", "nvme"]),
+    ("placa_mae", ["placa mae", "placa-mãe", "placa mãe", "motherboard"]),
+    ("water_cooler", ["water cooler", "watercooler"]),
+    ("air_cooler", ["air cooler", "cpu cooler"]),
+    ("fonte_pc", ["fonte gamer", "fonte atx", "80 plus"]),
+    ("gabinete_pc", ["gabinete gamer", "gabinete pc"]),
+    ("fan_pc", ["fan rgb", "fan argb", "kit fan"]),
+    ("kit_upgrade_pc", ["kit upgrade", "kit gamer placa mae", "kit gamer placa-mãe"]),
     ("controle_gamer", ["controle gamer", "gamepad"]),
     ("video_game", ["playstation", "xbox", "nintendo switch", "video game"]),
     ("perfume", ["perfume"]),
@@ -1084,6 +1109,36 @@ def oferta_compativel_com_grupo(oferta):
     ]
     if any(sinal in nome for sinal in sinais_console):
         return True
+
+    # Pecas de PC nem sempre trazem a palavra "gamer" no titulo. Quando a busca
+    # atual e de componente, exige sinais concretos do componente no nome real.
+    sinais_componentes_por_termo = {
+        "placa de video": ["placa de video", "placa de vídeo", "geforce", "rtx", "gtx", "radeon", " rx "],
+        "processador": ["processador", "ryzen", "core i5", "core i7", "core i9"],
+        "memoria ram": ["memoria ram", "memória ram", "ddr4", "ddr5"],
+        "ssd nvme": ["ssd nvme", "nvme", "m.2"],
+        "placa mae": ["placa mae", "placa mãe", "placa-mãe", "motherboard"],
+        "water cooler": ["water cooler", "watercooler"],
+        "air cooler": ["air cooler", "cpu cooler", "cooler para processador"],
+        "fonte pc": ["fonte", "atx", "80 plus"],
+        "gabinete": ["gabinete"],
+        "fan rgb": ["fan", "cooler rgb", "cooler argb"],
+        "kit upgrade": ["kit upgrade", "placa mae", "placa mãe", "placa-mãe", "processador"],
+    }
+    for termo_componente, sinais in sinais_componentes_por_termo.items():
+        if termo_componente in termo and any(sinal in f" {nome} " for sinal in sinais):
+            return True
+
+    # Teclados mecanicos/magneticos podem ser gamer mesmo quando o titulo nao
+    # escreve literalmente "gamer". A busca precisa ser de teclado e o titulo
+    # precisa confirmar a tecnologia real.
+    if "teclado" in termo:
+        sinais_teclado = [
+            "teclado mecanico", "teclado mecânico", "switch mecanico", "switch mecânico",
+            "teclado magnetico", "teclado magnético", "hall effect", "rapid trigger",
+        ]
+        if any(sinal in nome for sinal in sinais_teclado):
+            return True
 
     # Indicacao explicita no titulo e o sinal mais seguro.
     if "gamer" in nome or "gaming" in nome:
@@ -1241,7 +1296,7 @@ def encontrar_mais_vendido(headers):
 
         # Gamer recebe mais tentativas porque rankings genericos podem trazer
         # teclado/fone comum. Nos outros grupos mantemos a busca curta.
-        limite_termos = 7 if grupo == "gamer" else 3
+        limite_termos = 10 if grupo == "gamer" else 3
         termos_busca = termos_ordenados[:limite_termos]
         print(f"ROTACAO GRUPO={grupo} TERMOS={termos_busca}")
 
